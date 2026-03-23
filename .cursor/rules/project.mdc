@@ -1,0 +1,56 @@
+---
+description: Основной контекст и правила работы над проектом ФИПИ
+alwaysApply: true
+---
+
+# Проект ФИПИ
+
+Веб-приложение для работы с базой заданий ФИПИ: импорт JSON, просмотр, фильтрация, редактирование, экспорт, управление куррикулумом и КЭС, AI-анализ заданий через Anthropic Claude API.
+
+## Стек
+
+- **Backend**: Python 3, Flask
+- **База данных**: PostgreSQL (облако — Neon)
+- **Frontend**: vanilla JS, Bootstrap 5, MathJax
+- **AI**: Anthropic Claude API через `requests` (без официального SDK)
+- **Деплой**: Render (сервер) + Neon (БД), запуск: `gunicorn migration_app:app`
+
+## Файловая структура
+
+Проект имеет два набора файлов:
+
+| Файл | Назначение |
+|---|---|
+| `migration_app.py` | Flask-приложение для онлайн-версии |
+| `migration_database.py` | Работа с PostgreSQL (обёртка `_PGConn`, плейсхолдеры `%s`) |
+| `migration_analysis_pipeline.py` | AI-анализ заданий |
+| `migration_requirements.txt` | Зависимости для деплоя |
+| `Procfile` | Команда запуска для Render |
+| `app.py`, `database.py`, `analysis_pipeline.py` | Оригинальные файлы для локального запуска |
+
+## Правила редактирования
+
+- **Редактируем только `migration_*` файлы** — они используются в онлайн-версии на Render.
+- Оригинальные файлы (`app.py`, `database.py`, `analysis_pipeline.py`, `requirements.txt`) **не редактируются без прямого запроса**.
+- Новые файлы с изменениями логики называть с префиксом `migration_`.
+
+## База данных (PostgreSQL)
+
+- Подключение через переменную окружения `DATABASE_URL`.
+- Обёртка `_PGConn` в `migration_database.py` имитирует SQLite-интерфейс: метод `execute()`, автозамена `?` → `%s`.
+- Курсор использует `psycopg2.extras.DictCursor` — строки поддерживают как `row['col']`, так и `row[0]`.
+- Таблица `tasks` содержит явную колонку `rowid BIGSERIAL` (аналог SQLite rowid).
+- При добавлении нового поля в схему — выполнить `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` в Neon SQL Editor.
+
+## Деплой и обновление
+
+- Код хранится на GitHub, Render следит за репозиторием и автоматически обновляет сервер при коммите.
+- Прокси для Anthropic API не нужен — сервер на Render имеет прямой доступ.
+- Переменные окружения на Render: `DATABASE_URL`, `SECRET_KEY`, `ANTHROPIC_API_KEY`.
+
+## Стиль ответов
+
+- Всегда отвечать на русском языке.
+- Не предлагать запуск терминала без необходимости.
+- Не создавать `.md` файлы без явного запроса.
+- Не создавать тестовые файлы без явного запроса.
