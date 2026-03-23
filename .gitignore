@@ -1,0 +1,9 @@
+tasks.db
+*.db
+*.pyc
+__pycache__/
+.env
+venv/
+env/
+.venv/
+migration_export/
