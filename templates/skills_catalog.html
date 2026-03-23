@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Навыки и элементы содержания — ФИПИ</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
+  <style>
+    body { background: #f5f7fa; }
+    .filter-card { background: #fff; border: 1px solid #dee2e6; border-radius: .5rem; padding: 1rem; }
+    .item-group-header { font-size: .78rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+      color: #6c757d; padding: .35rem .75rem; background: #f8f9fa; border-bottom: 1px solid #e9ecef; }
+    .item-row { font-size: .9rem; padding: .4rem .75rem; border-bottom: 1px solid #f0f0f0; }
+    .item-row:last-child { border-bottom: none; }
+    .breadcrumb-path { font-size: .75rem; color: #adb5bd; }
+    .results-block { background: #fff; border: 1px solid #dee2e6; border-radius: .5rem; overflow: hidden; }
+    .empty-hint { color: #adb5bd; font-size: .9rem; }
+    #loading-spinner { display: none; }
+  </style>
+</head>
+<body class="p-3">
+<div class="container-fluid" style="max-width:1200px">
+
+  <!-- Заголовок -->
+  <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+    <a href="/" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> К базе</a>
+    <h1 class="h4 mb-0">Навыки и элементы содержания</h1>
+  </div>
+
+  <!-- Фильтры -->
+  <div class="filter-card mb-3">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-3">
+        <label class="form-label small mb-1">Предмет</label>
+        <select class="form-select form-select-sm" id="f-subject">
+          <option value="">— все предметы —</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small mb-1">Раздел</label>
+        <select class="form-select form-select-sm" id="f-section">
+          <option value="">— все разделы —</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small mb-1">Подраздел</label>
+        <select class="form-select form-select-sm" id="f-subsection">
+          <option value="">— все подразделы —</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small mb-1">Тема</label>
+        <select class="form-select form-select-sm" id="f-topic">
+          <option value="">— все темы —</option>
+        </select>
+      </div>
+    </div>
+    <div class="mt-2 d-flex gap-2 flex-wrap">
+      <button type="button" class="btn btn-sm btn-primary" onclick="loadItems('skills')">
+        <i class="bi bi-lightbulb me-1"></i>Показать навыки
+      </button>
+      <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadItems('elements')">
+        <i class="bi bi-journals me-1"></i>Показать элементы содержания
+      </button>
+      <span id="loading-spinner" class="ms-2 text-muted small align-self-center">
+        <span class="spinner-border spinner-border-sm me-1"></span>Загрузка…
+      </span>
+    </div>
+  </div>
+
+  <!-- Результаты -->
+  <div id="results-area">
+    <div class="text-center py-5 empty-hint">
+      <i class="bi bi-funnel fs-3 d-block mb-2"></i>
+      Выберите фильтры и нажмите кнопку для просмотра навыков или элементов содержания
+    </div>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+
+const fSubject    = document.getElementById('f-subject');
+const fSection    = document.getElementById('f-section');
+const fSubsection = document.getElementById('f-subsection');
+const fTopic      = document.getElementById('f-topic');
+const resultsArea = document.getElementById('results-area');
+const spinner     = document.getElementById('loading-spinner');
+
+// Hierarchical filter data
+let allTopics = [];
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function loadTopics() {
+  const res = await fetch('/api/curriculum/topics');
+  const data = await res.json();
+  allTopics = data.topics || [];
+  populateSubjects();
+}
+
+function unique(arr) {
+  return [...new Set(arr.filter(Boolean))].sort();
+}
+
+function populateSubjects() {
+  const subjects = unique(allTopics.map(t => t.subject));
+  fSubject.innerHTML = '<option value="">— все предметы —</option>' +
+    subjects.map(s => `<option value="${escHtml(s)}">${escHtml(s)}</option>`).join('');
+  populateSections();
+}
+
+function getFilteredTopics(subject, section, subsection) {
+  return allTopics.filter(t =>
+    (!subject    || t.subject    === subject)    &&
+    (!section    || t.section    === section)    &&
+    (!subsection || (t.subsection || '') === subsection)
+  );
+}
+
+function populateSections() {
+  const sub = fSubject.value;
+  const sections = unique(getFilteredTopics(sub, '', '').map(t => t.section));
+  fSection.innerHTML = '<option value="">— все разделы —</option>' +
+    sections.map(s => `<option value="${escHtml(s)}">${escHtml(s)}</option>`);
+  populateSubsections();
+}
+
+function populateSubsections() {
+  const sub = fSubject.value;
+  const sec = fSection.value;
+  const subsections = unique(getFilteredTopics(sub, sec, '').map(t => t.subsection || ''));
+  fSubsection.innerHTML = '<option value="">— все подразделы —</option>' +
+    subsections.filter(s => s).map(s => `<option value="${escHtml(s)}">${escHtml(s)}</option>`);
+  populateTopics();
+}
+
+function populateTopics() {
+  const sub  = fSubject.value;
+  const sec  = fSection.value;
+  const ssec = fSubsection.value;
+  const topics = getFilteredTopics(sub, sec, ssec);
+  fTopic.innerHTML = '<option value="">— все темы —</option>' +
+    topics.map(t => `<option value="${t.id}">${escHtml(t.topic)} (${escHtml(t.grade_class || '')}кл.)</option>`).join('');
+}
+
+fSubject.addEventListener('change', () => { fSection.value = ''; fSubsection.value = ''; fTopic.value = ''; populateSections(); });
+fSection.addEventListener('change', () => { fSubsection.value = ''; fTopic.value = ''; populateSubsections(); });
+fSubsection.addEventListener('change', () => { fTopic.value = ''; populateTopics(); });
+
+async function loadItems(type) {
+  spinner.style.display = '';
+  resultsArea.innerHTML = '';
+  try {
+    const params = new URLSearchParams();
+    params.set('type', type);
+    if (fSubject.value)    params.set('subject',    fSubject.value);
+    if (fSection.value)    params.set('section',    fSection.value);
+    if (fSubsection.value) params.set('subsection', fSubsection.value);
+    if (fTopic.value)      params.set('topic_id',   fTopic.value);
+
+    const res = await fetch('/api/skills-catalog/items?' + params.toString());
+    const data = await res.json();
+    renderItems(data.items || [], type);
+  } catch(e) {
+    resultsArea.innerHTML = `<div class="alert alert-danger">Ошибка загрузки: ${escHtml(String(e))}</div>`;
+  } finally {
+    spinner.style.display = 'none';
+  }
+}
+
+function renderItems(items, type) {
+  if (!items.length) {
+    resultsArea.innerHTML = '<div class="text-center py-4 empty-hint"><i class="bi bi-inbox fs-3 d-block mb-2"></i>Ничего не найдено</div>';
+    return;
+  }
+
+  const typeLabel = type === 'skills' ? 'навыков' : 'элементов содержания';
+  let html = `<div class="mb-2 small text-muted">Найдено: ${items.length} ${typeLabel}</div>`;
+  html += '<div class="results-block">';
+
+  // Group by section → subsection → topic
+  const grouped = {};
+  for (const item of items) {
+    const sec  = item.section    || '(без раздела)';
+    const ssec = item.subsection || '';
+    const top  = item.topic      || '(без темы)';
+    const key  = sec + '\x00' + ssec + '\x00' + top;
+    if (!grouped[key]) grouped[key] = { sec, ssec, top, grade: item.grade_class, items: [] };
+    grouped[key].items.push(item);
+  }
+
+  let lastSec = null;
+  let lastSsec = null;
+  for (const key of Object.keys(grouped)) {
+    const g = grouped[key];
+    const headerParts = [g.sec, g.ssec, g.top + (g.grade ? ` · ${g.grade} кл.` : '')].filter(Boolean);
+    const headerStr = headerParts.join(' / ');
+    html += `<div class="item-group-header">${escHtml(headerStr)}</div>`;
+    for (const item of g.items) {
+      html += `<div class="item-row">${escHtml(item.label_display)}</div>`;
+    }
+  }
+
+  html += '</div>';
+  resultsArea.innerHTML = html;
+}
+
+loadTopics();
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

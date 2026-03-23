@@ -587,6 +587,115 @@ def enrich_task_analysis_display(task_dict):
     task_dict['analysis_topic_linked'] = row is not None
 
 
+def get_curriculum_subsections(subject=None):
+    """Returns unique (section, subsection) pairs with topic count."""
+    conn = get_conn()
+    if subject:
+        rows = conn.execute(
+            '''SELECT section, subsection, COUNT(*) as topic_count
+               FROM math_curriculum_topics
+               WHERE subject = %s
+               GROUP BY section, subsection
+               ORDER BY section, subsection''',
+            (subject,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            '''SELECT section, subsection, COUNT(*) as topic_count
+               FROM math_curriculum_topics
+               GROUP BY section, subsection
+               ORDER BY section, subsection'''
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_topics_by_subsection(section, subsection):
+    """Returns all topics for a given (section, subsection) pair."""
+    conn = get_conn()
+    subsection_val = subsection or ''
+    rows = conn.execute(
+        '''SELECT id, subject, section, subsection, topic, topic_description, grade_class
+           FROM math_curriculum_topics
+           WHERE section = %s
+             AND (subsection = %s OR (%s = '' AND (subsection IS NULL OR subsection = '')))
+           ORDER BY grade_class, topic''',
+        (section, subsection_val, subsection_val),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_skills_for_catalog(subject=None, section=None, subsection=None, topic_id=None):
+    """Returns skill_defs with topic hierarchy, filtered by curriculum position."""
+    conn = get_conn()
+    where_parts = []
+    params = []
+    if topic_id is not None:
+        where_parts.append('sd.default_topic_id = %s')
+        params.append(topic_id)
+    else:
+        if subject is not None:
+            where_parts.append('mct.subject = %s')
+            params.append(subject)
+        if section is not None:
+            where_parts.append('mct.section = %s')
+            params.append(section)
+        if subsection is not None:
+            subsection_val = subsection or ''
+            where_parts.append(
+                "(mct.subsection = %s OR (%s = '' AND (mct.subsection IS NULL OR mct.subsection = '')))"
+            )
+            params.extend([subsection_val, subsection_val])
+    base_query = (
+        'SELECT sd.id, sd.label_display,'
+        ' mct.subject, mct.section, mct.subsection, mct.topic, mct.grade_class'
+        ' FROM skill_defs sd'
+        ' LEFT JOIN math_curriculum_topics mct ON mct.id = sd.default_topic_id'
+    )
+    if where_parts:
+        base_query += ' WHERE ' + ' AND '.join(where_parts)
+    base_query += ' ORDER BY mct.section, mct.subsection, mct.topic, sd.label_display'
+    rows = conn.execute(base_query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_content_elements_for_catalog(subject=None, section=None, subsection=None, topic_id=None):
+    """Returns content_element_defs with topic hierarchy, filtered by curriculum position."""
+    conn = get_conn()
+    where_parts = []
+    params = []
+    if topic_id is not None:
+        where_parts.append('ced.default_topic_id = %s')
+        params.append(topic_id)
+    else:
+        if subject is not None:
+            where_parts.append('mct.subject = %s')
+            params.append(subject)
+        if section is not None:
+            where_parts.append('mct.section = %s')
+            params.append(section)
+        if subsection is not None:
+            subsection_val = subsection or ''
+            where_parts.append(
+                "(mct.subsection = %s OR (%s = '' AND (mct.subsection IS NULL OR mct.subsection = '')))"
+            )
+            params.extend([subsection_val, subsection_val])
+    base_query = (
+        'SELECT ced.id, ced.label_display,'
+        ' mct.subject, mct.section, mct.subsection, mct.topic, mct.grade_class'
+        ' FROM content_element_defs ced'
+        ' LEFT JOIN math_curriculum_topics mct ON mct.id = ced.default_topic_id'
+    )
+    if where_parts:
+        base_query += ' WHERE ' + ' AND '.join(where_parts)
+    base_query += ' ORDER BY mct.section, mct.subsection, mct.topic, ced.label_display'
+    rows = conn.execute(base_query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def save_task_analysis(
     task_id,
     group_id,
@@ -601,9 +710,11 @@ def save_task_analysis(
     analysis_result_json,
     analysis_usage_json,
     analysis_fallback_json=None,
+    suggested_answer=None,
 ):
     conn = get_conn()
     sol = (analysis_solution or '').strip()
+    ans = (suggested_answer or '').strip()
     conn.execute(
         '''UPDATE tasks SET
             analyzed_topic_id = %s,
@@ -616,7 +727,8 @@ def save_task_analysis(
             analysis_result_json = %s,
             analysis_usage_json = %s,
             analysis_fallback_json = %s,
-            solution = CASE WHEN %s != '' THEN %s ELSE solution END
+            solution = CASE WHEN %s != '' THEN %s ELSE solution END,
+            answer = CASE WHEN (answer IS NULL OR answer = '') AND %s != '' THEN %s ELSE answer END
            WHERE id = %s AND group_id = %s AND group_position = %s''',
         (
             analyzed_topic_id,
@@ -631,6 +743,8 @@ def save_task_analysis(
             analysis_fallback_json,
             sol,
             sol,
+            ans,
+            ans,
             task_id or '',
             group_id or '',
             group_position or '',

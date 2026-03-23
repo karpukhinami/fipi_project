@@ -1,5 +1,5 @@
 Структура ответа — как в блоке «чёткий шаблон корня» и микро-шаблонах в тексте схемы JSON выше; типы и обязательные вложенные ключи совпадают с ними.
-- topic_id: integer из справочника тем (topics_json).
+- subsection_choice: строка, точно совпадающая с subsection (или section) из subsections_json.
 - content_elements: только массив объектов; у каждого объекта обязательны name, stage, importance; доп. ключи разрешены.
 - educational_actions: только массив объектов с action (непустая строка) и prerequisite (массив целых); порядок = порядок шагов решения.
 - task_type_by_action / task_type_by_widget / answer_format / solution_steps / final_answer / bloom_level — как в шаблоне корня.

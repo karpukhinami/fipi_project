@@ -516,7 +516,8 @@ function renderTaskCard(task, wrapper) {
   const images = task.images || {};
   const audio = task.audio || {};
   const renderedAnswer = renderTaskText(task.answer || '', images, audio);
-  const renderedSolution = renderTaskText(cleanSolutionText(task.solution || ''), images, audio);
+  const rawSolution = cleanSolutionText(task.solution || '');
+  const renderedSolution = _renderSolutionHtml(rawSolution, images, audio, task);
 
   const answerBlock = !isWrapper ? `
     <div class="mt-3">
@@ -699,6 +700,20 @@ function cleanSolutionText(text) {
   return text
     .replace(/Решениеrule_info\.\s*/g, '')  // убираем артефакт целиком
     .replace(/npnp/g, '');                   // убираем артефакт
+}
+
+/**
+ * Рендерит поле решения: если нет маркеров изображений/аудио и доступен marked.js —
+ * используем markdown-рендер (так формулы LaTeX $..$ и разметка сохраняются).
+ * Иначе — стандартный renderTaskText.
+ */
+function _renderSolutionHtml(text, images, audio, task) {
+  if (!text) return '<em class="text-muted">Текст отсутствует</em>';
+  const hasMarkers = /\[img[_:]/.test(text) || /\[audio:/.test(text) || /\[TABLE>>>/.test(text) || /\[attachment:/.test(text);
+  if (!hasMarkers && window.marked) {
+    return marked.parse(text);
+  }
+  return renderTaskText(text, images, audio, task);
 }
 
 // ── Рендер текста с маркерами ──────────────────────────────
@@ -900,7 +915,7 @@ function toggleEditMode() {
       }
       if (solutionEl) {
         solutionEl.contentEditable = 'false';
-        const html = renderTaskText(cleanSolutionText(task.solution || ''), images, audio, task);
+        const html = _renderSolutionHtml(cleanSolutionText(task.solution || ''), images, audio, task);
         solutionEl.innerHTML = html || '<span class="text-muted">—</span>';
       }
       if (window.MathJax && window.MathJax.typesetPromise) {

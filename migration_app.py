@@ -12,6 +12,7 @@ from migration_database import (
     get_attachment_data, get_curriculum_topics, update_curriculum_topic,
     add_curriculum_topic, delete_curriculum_topic, import_math_curriculum_from_xlsx,
     get_analysis_prompt, set_analysis_prompt,
+    get_skills_for_catalog, get_content_elements_for_catalog,
 )
 from migration_analysis_pipeline import run_task_analysis, build_analysis_prompt_page_payload
 
@@ -525,6 +526,33 @@ def api_tasks_clear_analysis():
         return jsonify({'ok': False, 'error': 'Задание не найдено'}), 404
     task = get_task_by_id_params(task_id, group_id, group_position)
     return jsonify({'ok': True, 'task': task})
+
+
+
+
+@app.route('/skills-catalog')
+def skills_catalog():
+    return render_template('skills_catalog.html')
+
+
+@app.route('/api/skills-catalog/items', methods=['GET'])
+def api_skills_catalog_items():
+    item_type  = request.args.get('type', 'skills')
+    subject    = request.args.get('subject') or None
+    section    = request.args.get('section') or None
+    subsection = request.args.get('subsection') or None
+    topic_id_raw = request.args.get('topic_id')
+    topic_id   = int(topic_id_raw) if topic_id_raw and topic_id_raw.isdigit() else None
+
+    if item_type == 'elements':
+        rows = get_content_elements_for_catalog(
+            subject=subject, section=section, subsection=subsection, topic_id=topic_id
+        )
+    else:
+        rows = get_skills_for_catalog(
+            subject=subject, section=section, subsection=subsection, topic_id=topic_id
+        )
+    return jsonify({'ok': True, 'type': item_type, 'items': rows})
 
 
 if __name__ == '__main__':

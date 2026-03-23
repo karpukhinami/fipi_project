@@ -25,6 +25,8 @@ from rapidfuzz import fuzz, process
 from migration_database import (
     get_curriculum_topics,
     get_curriculum_topic,
+    get_curriculum_subsections,
+    get_topics_by_subsection,
     get_analysis_prompt,
     read_default_analysis_prompt_file,
     read_analysis_json_schema_file,
@@ -192,6 +194,12 @@ def normalize_analysis_raw(raw: dict) -> Tuple[dict, List[str]]:
 
     out = dict(raw)
 
+    # Normalize subsection_choice (new flow)
+    sc = out.get("subsection_choice")
+    if sc is not None:
+        out["subsection_choice"] = _as_str(sc)
+
+    # Normalize topic_id (legacy flow / second pass)
     tid = out.get("topic_id")
     ci = _coerce_int(tid)
     if ci is not None and ci != tid:
@@ -403,14 +411,19 @@ def normalize_analysis_raw(raw: dict) -> Tuple[dict, List[str]]:
     return out, fixes
 
 
-def validate_analysis_raw(raw: dict) -> List[str]:
+def validate_analysis_raw(raw: dict, mode: str = "subsection_flow") -> List[str]:
     errs: List[str] = []
     if not isinstance(raw, dict):
         return ["корень не объект"]
-    if raw.get("topic_id") is None:
-        errs.append("отсутствует или пустой topic_id")
-    elif not isinstance(raw.get("topic_id"), int):
-        errs.append("topic_id должен быть целым числом")
+    if mode == "subsection_flow":
+        sc = raw.get("subsection_choice")
+        if not sc or not isinstance(sc, str) or not sc.strip():
+            errs.append("отсутствует или пустой subsection_choice")
+    else:
+        if raw.get("topic_id") is None:
+            errs.append("отсутствует или пустой topic_id")
+        elif not isinstance(raw.get("topic_id"), int):
+            errs.append("topic_id должен быть целым числом")
     for key, label in (
         ("content_elements", "content_elements"),
         ("educational_actions", "educational_actions"),
@@ -490,7 +503,8 @@ def get_analysis_field_rules_text() -> str:
 
 ANALYSIS_PLACEHOLDERS_HELP = """Подстановки сервера (оставляйте имя в фигурных скобках ровно как указано):
 
-{topics_json} — JSON-массив тем из справочника.
+{subsections_json} — JSON-массив подразделов из справочника (новый поток: первый запрос).
+{topics_json} — JSON-массив тем из справочника (устаревший поток: весь список).
 {meta_json} — JSON с полями импорта.
 {kes} — строка КЭС задания или «—».
 {exam_type}, {task_number}, {answer_type}, {answer_format_import}, {subject_import} — отдельные поля.
@@ -619,6 +633,14 @@ MERGE_JSON_SCHEMA_TEXT = """Корневой объект:
 }"""
 
 
+MERGE_WITH_TOPIC_JSON_SCHEMA_TEXT = """Корневой объект:
+{
+  "topic_id": <int из списка тем подраздела>,
+  "content_results": [{"local_i": <int>, "existing_id": <int или null>}],
+  "skill_results": [{"action_index": <int>, "existing_id": <int или null>}]
+}"""
+
+
 def repair_merge_mapping_via_llm(
     api_key: str,
     model: str,
@@ -638,6 +660,210 @@ def repair_merge_mapping_via_llm(
     return anthropic_messages(api_key, model,
         [{"role": "user", "content": [{"type": "text", "text": user}]}],
         system, max_tokens=4096, proxy_url=proxy_url)
+
+
+def normalize_merge_with_topic_mapping(mapping: dict) -> Tuple[dict, List[str]]:
+    """Extends normalize_merge_mapping to also handle topic_id."""
+    fixes: List[str] = []
+    if not isinstance(mapping, dict):
+        return {"topic_id": None, "content_results": [], "skill_results": []}, ["mapping не объект"]
+    out, base_fixes = normalize_merge_mapping(mapping)
+    fixes.extend(base_fixes)
+    tid = out.get("topic_id")
+    ci = _coerce_int(tid)
+    if ci is not None:
+        out["topic_id"] = ci
+    else:
+        out["topic_id"] = None
+        if tid is not None:
+            fixes.append("topic_id не удалось привести к int — обнулено")
+    return out, fixes
+
+
+def _get_topics_for_subsection_choice(
+    all_topics: List[dict], subsection_choice: str, section_choice: str = ""
+) -> List[dict]:
+    """Finds topics matching subsection_choice returned by the model."""
+    subsection_choice = (subsection_choice or "").strip()
+    section_choice = (section_choice or "").strip()
+    if not subsection_choice:
+        return []
+    # Exact match on subsection field
+    matches = [t for t in all_topics if (t.get("subsection") or "").strip() == subsection_choice]
+    if matches:
+        return matches
+    # Subsection is empty → model may have returned the section name
+    matches = [t for t in all_topics if (t.get("section") or "").strip() == subsection_choice]
+    if matches:
+        return matches
+    # Fuzzy fallback
+    subs_set = list({(t.get("subsection") or t.get("section") or "").strip() for t in all_topics})
+    subs_set = [s for s in subs_set if s]
+    if subs_set:
+        best, score, _ = process.extractOne(subsection_choice, subs_set, scorer=fuzz.token_sort_ratio)
+        if score >= 75:
+            matches = [
+                t for t in all_topics
+                if (t.get("subsection") or t.get("section") or "").strip() == best
+            ]
+    return matches
+
+
+def merge_catalogs_with_topic_llm(
+    raw: dict,
+    subsection_choice: str,
+    section_choice: str,
+    subsection_topics: List[dict],
+    api_key: str,
+    model: str,
+    proxy_url: Optional[str],
+    task_body_text: str = "",
+    task_images: Optional[dict] = None,
+) -> dict:
+    """Second pass: picks topic_id from subsection topics AND matches skills/elements."""
+    from migration_database import get_conn
+
+    conn = get_conn()
+    ce_rows = conn.execute("SELECT id, label_display FROM content_element_defs").fetchall()
+    sk_rows = conn.execute("SELECT id, label_display FROM skill_defs").fetchall()
+    conn.close()
+
+    ce_choices = {r[1]: r[0] for r in ce_rows}
+    sk_choices = {r[1]: r[0] for r in sk_rows}
+    ce_list = list(ce_choices.keys())
+    sk_list = list(sk_choices.keys())
+
+    content_items: List[dict] = []
+    for li, el in enumerate(raw.get("content_elements") or []):
+        name = (el.get("name") or "").strip()
+        if not name:
+            continue
+        cand = []
+        if ce_list:
+            for m, score, _ in process.extract(name, ce_list, scorer=fuzz.token_sort_ratio, limit=5):
+                if score >= 55:
+                    cand.append({"id": ce_choices[m], "label": m, "score": score})
+        content_items.append({"local_i": li, "text": name, "stage": el.get("stage"),
+                               "importance": el.get("importance"), "candidates": cand})
+
+    skill_items: List[dict] = []
+    for ai, ed in enumerate(raw.get("educational_actions") or []):
+        act = (ed.get("action") or "").strip()
+        if not act:
+            continue
+        cand = []
+        if sk_list:
+            for m, score, _ in process.extract(act, sk_list, scorer=fuzz.token_sort_ratio, limit=5):
+                if score >= 55:
+                    cand.append({"id": sk_choices[m], "label": m, "score": score})
+        skill_items.append({"action_index": ai, "text": act,
+                            "prerequisite": ed.get("prerequisite") or [], "candidates": cand})
+
+    topics_payload = _topics_payload_for_prompt(subsection_topics)
+
+    user_data = {
+        "instructions": (
+            f"{JSON_OUTPUT_STRICT_RU}\n"
+            f"Выбери РОВНО ОДНУ тему из списка topics (topic_id — целое число из списка, не выдумывай). "
+            f"Для каждого элемента content: если смысл совпадает с кандидатом из candidates — укажи его existing_id, иначе null. "
+            f"Для каждого навыка skills: аналогично. "
+            f"Строгий вид ответа:\n{MERGE_WITH_TOPIC_JSON_SCHEMA_TEXT}"
+        ),
+        "topics": topics_payload,
+        "subsection_context": {"subsection": subsection_choice, "section": section_choice},
+        "content": content_items,
+        "skills": skill_items,
+    }
+    user_text = json.dumps(user_data, ensure_ascii=False)
+
+    user_parts: List[dict] = []
+    if task_body_text:
+        user_parts.extend(build_message_content(
+            f"Условие задачи (для контекста выбора темы):\n{task_body_text}",
+            task_images or {},
+        ))
+    user_parts.append({"type": "text", "text": "\n\n" + user_text})
+
+    sys = "\n\n".join([
+        JSON_OUTPUT_STRICT_RU,
+        "Ты выбираешь тему из подраздела и сопоставляешь формулировки с элементами справочника.",
+        MERGE_WITH_TOPIC_JSON_SCHEMA_TEXT,
+        "Ответ — только один JSON-объект.",
+    ])
+
+    text, u = anthropic_messages(api_key, model,
+        [{"role": "user", "content": user_parts}],
+        sys, max_tokens=4096, proxy_url=proxy_url)
+
+    mapping: dict = {}
+    try:
+        mapping = extract_json_object(text)
+    except Exception as parse_ex:
+        try:
+            text2, u2 = repair_merge_mapping_via_llm(api_key, model, proxy_url,
+                failed_text=text, reason=f"парсинг merge+topic JSON: {parse_ex}", payload_user=user_text)
+            u["input_tokens"] += u2["input_tokens"]
+            u["output_tokens"] += u2["output_tokens"]
+            mapping = extract_json_object(text2)
+        except Exception:
+            mapping = {}
+
+    mapping, _ = normalize_merge_with_topic_mapping(mapping)
+
+    topic_id_from_merge = mapping.get("topic_id")
+    valid_topic_ids = {t["id"] for t in subsection_topics}
+    if topic_id_from_merge not in valid_topic_ids:
+        topic_id_from_merge = subsection_topics[0]["id"] if subsection_topics else None
+
+    cr: Dict[int, Optional[int]] = {}
+    sr: Dict[int, Optional[int]] = {}
+    for row in mapping.get("content_results") or []:
+        if row.get("local_i") is not None:
+            cr[int(row["local_i"])] = row.get("existing_id")
+    for row in mapping.get("skill_results") or []:
+        if row.get("action_index") is not None:
+            sr[int(row["action_index"])] = row.get("existing_id")
+
+    normalized_content = []
+    for it in content_items:
+        li = it["local_i"]
+        existing = cr.get(li)
+        try:
+            eid = int(existing) if existing is not None and str(existing).lower() != "null" else None
+        except (TypeError, ValueError):
+            eid = None
+        if eid is None:
+            eid = upsert_content_element(it["text"], topic_id_from_merge)
+        normalized_content.append({"id": eid, "label": it["text"],
+                                    "importance": it.get("importance"), "stage": it.get("stage")})
+
+    skill_steps_out: List[dict] = []
+    skill_id_by_action_index: Dict[int, int] = {}
+    for it in skill_items:
+        ai = it["action_index"]
+        existing = sr.get(ai)
+        try:
+            eid = int(existing) if existing is not None and str(existing).lower() != "null" else None
+        except (TypeError, ValueError):
+            eid = None
+        if eid is None:
+            eid = upsert_skill(it["text"], topic_id_from_merge)
+        skill_id_by_action_index[ai] = eid
+        skill_steps_out.append({
+            "order": ai, "skill_id": eid, "label": it["text"],
+            "prereq_indices": it.get("prerequisite") or [],
+        })
+    skill_steps_out.sort(key=lambda x: x["order"])
+
+    return {
+        "topic_id": topic_id_from_merge,
+        "normalized": {
+            "content_elements": normalized_content,
+            "skill_steps": skill_steps_out,
+            "skill_id_by_action_index": skill_id_by_action_index,
+        },
+        "usage": u,
+    }
 
 
 _ANTHROPIC_IMAGE_MIME_ALLOWED = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
@@ -850,11 +1076,34 @@ def _topics_json_for_prompt(topics: List[dict]) -> str:
     return json.dumps(_topics_payload_for_prompt(topics), ensure_ascii=False)
 
 
+def _subsections_payload_for_prompt(topics: List[dict]) -> List[dict]:
+    """Groups topics into unique (section, subsection) pairs for the first pass."""
+    seen: Dict[tuple, int] = {}
+    result: List[dict] = []
+    for t in topics:
+        section = (t.get("section") or "").strip()
+        subsection = (t.get("subsection") or "").strip()
+        key = (section, subsection)
+        if key not in seen:
+            idx = len(result)
+            seen[key] = idx
+            result.append({"idx": idx, "section": section, "subsection": subsection, "topic_count": 1})
+        else:
+            result[seen[key]]["topic_count"] += 1
+    return result
+
+
+def _subsections_json_for_prompt(topics: List[dict]) -> str:
+    return json.dumps(_subsections_payload_for_prompt(topics), ensure_ascii=False)
+
+
 def substitute_analysis_system_template(template: str, topics: List[dict], kes: str, meta: dict) -> str:
     topics_json = _topics_json_for_prompt(topics)
+    subsections_json = _subsections_json_for_prompt(topics)
     meta_json = json.dumps(meta, ensure_ascii=False)
     repl = {
         "{topics_json}": topics_json,
+        "{subsections_json}": subsections_json,
         "{meta_json}": meta_json,
         "{kes}": kes or "—",
         "{json_output_strict}": JSON_OUTPUT_STRICT_RU,
@@ -895,9 +1144,21 @@ def build_analysis_system_prompt(custom_template: str, topics: List[dict], kes: 
     t = (custom_template or "").strip()
     if not t:
         t = load_default_analysis_system_template()
-    if "{topics_json}" in t:
+    if "{topics_json}" in t or "{subsections_json}" in t:
         return substitute_analysis_system_template(t, topics, kes, meta)
     return _legacy_build_system_prompt(topics, t, kes, meta)
+
+
+def _use_subsection_flow(template: str) -> bool:
+    """True if the template uses the new subsection-based flow."""
+    has_topics = "{topics_json}" in template
+    has_subs = "{subsections_json}" in template
+    if has_subs:
+        return True
+    if has_topics:
+        return False
+    # Default template (loaded from file) — use new flow
+    return True
 
 
 USER_MESSAGE_ANALYSIS_DESCRIPTION = """Роль user — одно сообщение с несколькими блоками content."""
@@ -973,6 +1234,9 @@ def run_task_analysis(
         return {"ok": False, "error": "Справочник тем пуст. Добавьте темы на странице «Темы»."}
 
     custom_prompt, _ = get_analysis_prompt()
+    template = (custom_prompt or "").strip() or load_default_analysis_system_template()
+    subsection_flow = _use_subsection_flow(template)
+
     body_text = (task.get("formatted_text") or "").strip() or (task.get("text") or "")
     images = collect_images_for_analysis_task(task)
     kes = (task.get("kes") or "").strip()
@@ -1014,6 +1278,8 @@ def run_task_analysis(
     except Exception as e:
         parse_err = str(e)
 
+    first_pass_mode = "subsection_flow" if subsection_flow else "topic_flow"
+
     if raw is None:
         try:
             t_fix, u_fix = repair_analysis_json_via_llm(api_key, model, proxy_url,
@@ -1033,7 +1299,7 @@ def run_task_analysis(
 
     raw, fixes = normalize_analysis_raw(raw)
     mech_notes.extend(fixes)
-    val_errs = validate_analysis_raw(raw)
+    val_errs = validate_analysis_raw(raw, mode=first_pass_mode)
     if val_errs:
         try:
             t_fix2, u_fix2 = repair_analysis_json_via_llm(api_key, model, proxy_url,
@@ -1044,7 +1310,7 @@ def run_task_analysis(
             raw, fixes2 = normalize_analysis_raw(raw)
             mech_notes.extend(fixes2)
             mech_notes.append("JSON скорректирован повторным вызовом модели")
-            val_errs = validate_analysis_raw(raw)
+            val_errs = validate_analysis_raw(raw, mode=first_pass_mode)
         except Exception as e3:
             val_errs.append(f"исправление структуры: {e3}")
 
@@ -1058,16 +1324,48 @@ def run_task_analysis(
             "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
         }
 
-    topic_id = raw.get("topic_id")
-    try:
-        topic_id = int(topic_id)
-    except (TypeError, ValueError):
-        return {
-            "ok": False,
-            "error": f"Некорректный topic_id: {topic_id!r}",
-            "usage": usage_total,
-            "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
-        }
+    # ── Second pass: get topic_id (subsection flow) or use it from first pass (legacy) ──
+    if subsection_flow:
+        subsection_choice = (raw.get("subsection_choice") or "").strip()
+        section_choice = (raw.get("section") or "").strip()
+        subsection_topics = _get_topics_for_subsection_choice(topics, subsection_choice, section_choice)
+        if not subsection_topics:
+            return {
+                "ok": False,
+                "error": f"Подраздел «{subsection_choice}» не найден в справочнике тем",
+                "usage": usage_total,
+                "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+            }
+
+        merge_usage = merge_catalogs_with_topic_llm(
+            raw, subsection_choice, section_choice, subsection_topics,
+            api_key, model, proxy_url,
+            task_body_text=body_text, task_images=images,
+        )
+        topic_id = merge_usage.get("topic_id")
+        if not topic_id:
+            return {
+                "ok": False,
+                "error": "Второй проход не вернул topic_id",
+                "usage": usage_total,
+                "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+            }
+    else:
+        topic_id = raw.get("topic_id")
+        try:
+            topic_id = int(topic_id)
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "error": f"Некорректный topic_id: {topic_id!r}",
+                "usage": usage_total,
+                "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+            }
+        merge_usage = merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url)
+
+    mu = merge_usage.get("usage") or {}
+    usage_total["input_tokens"] += int(mu.get("input_tokens") or 0)
+    usage_total["output_tokens"] += int(mu.get("output_tokens") or 0)
 
     topic_row = get_curriculum_topic(topic_id)
     if not topic_row:
@@ -1077,11 +1375,6 @@ def run_task_analysis(
             "usage": usage_total,
             "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
         }
-
-    merge_usage = merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url)
-    mu = merge_usage.get("usage") or {}
-    usage_total["input_tokens"] += int(mu.get("input_tokens") or 0)
-    usage_total["output_tokens"] += int(mu.get("output_tokens") or 0)
 
     normalized = merge_usage["normalized"]
     task_rowid = get_task_rowid(task.get("id"), task.get("group_id"), task.get("group_position"))
@@ -1107,7 +1400,7 @@ def run_task_analysis(
         solution_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(new_solution) if s)
     else:
         solution_text = ""
-    fa = raw.get("final_answer")
+    fa = raw.get("final_answer") or ""
     if fa:
         solution_text = (solution_text + "\n\nОтвет: " + str(fa)).strip()
 
@@ -1149,6 +1442,7 @@ def run_task_analysis(
         json.dumps(result_payload, ensure_ascii=False),
         json.dumps(usage_json, ensure_ascii=False),
         fallback_json,
+        suggested_answer=fa or None,
     )
 
     return {
