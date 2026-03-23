@@ -1,0 +1,9 @@
+Структура ответа — как в блоке «чёткий шаблон корня» и микро-шаблонах в тексте схемы JSON выше; типы и обязательные вложенные ключи совпадают с ними.
+- topic_id: integer из справочника тем (topics_json).
+- content_elements: только массив объектов; у каждого объекта обязательны name, stage, importance; доп. ключи разрешены.
+- educational_actions: только массив объектов с action (непустая строка) и prerequisite (массив целых); порядок = порядок шагов решения.
+- task_type_by_action / task_type_by_widget / answer_format / solution_steps / final_answer / bloom_level — как в шаблоне корня.
+- non_subject_context: массив объектов с полями present, other_subject, plot, replaceable.
+- non_text_elements, variable_numbers, variable_expressions, structural_elements: массивы объектов в форме микро-шаблонов.
+- requires_external_info: boolean; external_info_sources, hidden_assumptions, key_features: массивы строк.
+- subject, section, topic, grade_level, curriculum_standard, source, text_length — как в шаблоне корня.

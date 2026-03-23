@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Темы (математика) — ФИПИ</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
+  <style>
+    body { background: #f5f7fa; }
+    .table-wrap { overflow-x: auto; }
+    td input, td textarea { font-size: .82rem; }
+  </style>
+</head>
+<body class="p-3">
+<div class="container-fluid" style="max-width:1400px">
+  <div class="d-flex align-items-center gap-2 mb-3">
+    <a href="/" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> К базе</a>
+    <h1 class="h4 mb-0">Справочник тем (математика 7–11)</h1>
+  </div>
+  <p class="text-muted small">Изменение класса и названий здесь обновит поля у всех заданий с выбранной <code>topic_id</code>.</p>
+
+  <div class="card mb-3">
+    <div class="card-header">Импорт из Excel (.xlsx)</div>
+    <div class="card-body d-flex flex-wrap align-items-center gap-2">
+      <label class="btn btn-sm btn-outline-secondary mb-0">
+        Выбрать math_topics_v2.xlsx
+        <input type="file" id="xlsx-input" accept=".xlsx" style="display:none"/>
+      </label>
+      <button type="button" class="btn btn-sm btn-warning" id="btn-import-xlsx" disabled>Заменить весь справочник</button>
+      <span class="small text-muted" id="xlsx-name"></span>
+    </div>
+    <div class="card-footer small text-danger">Импорт сбросит привязку тем у уже проанализированных заданий (старые <code>topic_id</code> перестанут действовать).</div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-header">Добавить тему</div>
+    <div class="card-body row g-2">
+      <div class="col-md-2"><input class="form-control form-control-sm" id="add-subject" placeholder="Предмет" value="Математика"/></div>
+      <div class="col-md-2"><input class="form-control form-control-sm" id="add-section" placeholder="Раздел"/></div>
+      <div class="col-md-2"><input class="form-control form-control-sm" id="add-subsection" placeholder="Подраздел"/></div>
+      <div class="col-md-2"><input class="form-control form-control-sm" id="add-topic" placeholder="Тема"/></div>
+      <div class="col-md-1"><input class="form-control form-control-sm" id="add-grade" placeholder="Класс"/></div>
+      <div class="col-md-2"><input class="form-control form-control-sm" id="add-desc" placeholder="Описание"/></div>
+      <div class="col-md-1"><button type="button" class="btn btn-sm btn-primary w-100" id="btn-add">Добавить</button></div>
+    </div>
+  </div>
+
+  <div class="table-wrap card">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-light"><tr>
+        <th>id</th><th>Предмет</th><th>Раздел</th><th>Подраздел</th><th>Тема</th><th>Класс</th><th>Описание</th><th></th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+async function load() {
+  const res = await fetch('/api/curriculum/topics');
+  const data = await res.json();
+  const tb = document.getElementById('tbody');
+  tb.innerHTML = (data.topics || []).map(t => `
+    <tr data-id="${t.id}">
+      <td class="text-muted">${t.id}</td>
+      <td><input class="form-control form-control-sm fld" data-f="subject" value="${esc(t.subject)}"/></td>
+      <td><input class="form-control form-control-sm fld" data-f="section" value="${esc(t.section)}"/></td>
+      <td><input class="form-control form-control-sm fld" data-f="subsection" value="${esc(t.subsection||'')}"/></td>
+      <td><input class="form-control form-control-sm fld" data-f="topic" value="${esc(t.topic)}"/></td>
+      <td style="width:4rem"><input class="form-control form-control-sm fld" data-f="grade_class" value="${esc(t.grade_class)}"/></td>
+      <td><textarea class="form-control form-control-sm fld" data-f="topic_description" rows="2">${esc(t.topic_description||'')}</textarea></td>
+      <td>
+        <button type="button" class="btn btn-sm btn-outline-primary btn-save-row">Сохранить</button>
+        <button type="button" class="btn btn-sm btn-outline-danger btn-del-row">Удалить</button>
+      </td>
+    </tr>
+  `).join('');
+
+  tb.querySelectorAll('.btn-save-row').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const tr = btn.closest('tr');
+      const id = tr.dataset.id;
+      const fields = {};
+      tr.querySelectorAll('.fld').forEach(inp => { fields[inp.dataset.f] = inp.value; });
+      const res = await fetch('/api/curriculum/topics/' + id, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(fields) });
+      const d = await res.json();
+      alert(res.ok ? 'Сохранено' : (d.error || 'Ошибка'));
+    });
+  });
+  tb.querySelectorAll('.btn-del-row').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Удалить тему?')) return;
+      const tr = btn.closest('tr');
+      const res = await fetch('/api/curriculum/topics/' + tr.dataset.id, { method: 'DELETE' });
+      const d = await res.json();
+      if (res.ok) load(); else alert(d.error || 'Ошибка');
+    });
+  });
+}
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+}
+
+let _xlsxFile = null;
+document.getElementById('xlsx-input').addEventListener('change', e => {
+  _xlsxFile = e.target.files[0] || null;
+  document.getElementById('xlsx-name').textContent = _xlsxFile ? _xlsxFile.name : '';
+  document.getElementById('btn-import-xlsx').disabled = !_xlsxFile;
+});
+document.getElementById('btn-import-xlsx').addEventListener('click', async () => {
+  if (!_xlsxFile || !confirm('Полностью заменить справочник тем? Сбросятся analyzed_topic у заданий.')) return;
+  const fd = new FormData();
+  fd.append('file', _xlsxFile);
+  const res = await fetch('/api/curriculum/import-xlsx', { method: 'POST', body: fd });
+  const d = await res.json();
+  if (res.ok) { alert('Импортировано строк: ' + (d.inserted || 0)); load(); }
+  else alert(d.error || 'Ошибка');
+});
+
+document.getElementById('btn-add').addEventListener('click', async () => {
+  const body = {
+    subject: document.getElementById('add-subject').value,
+    section: document.getElementById('add-section').value,
+    subsection: document.getElementById('add-subsection').value,
+    topic: document.getElementById('add-topic').value,
+    grade_class: document.getElementById('add-grade').value,
+    topic_description: document.getElementById('add-desc').value,
+  };
+  const res = await fetch('/api/curriculum/topics', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const d = await res.json();
+  if (res.ok) { load(); ['add-section','add-subsection','add-topic','add-grade','add-desc'].forEach(id => document.getElementById(id).value=''); }
+  else alert(d.error || 'Ошибка');
+});
+
+load();
+</script>
+</body>
+</html>

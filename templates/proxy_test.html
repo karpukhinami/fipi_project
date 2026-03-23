@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Проверка прокси — ФИПИ</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
+  <style>
+    body { background: #f0f4f8; min-height: 100vh; }
+    .card { border: none; box-shadow: 0 4px 24px rgba(26, 35, 126, .08); }
+    .page-title { color: #1a237e; font-weight: 600; }
+    #result-box { font-size: .92rem; white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body>
+<div class="container py-4" style="max-width: 640px;">
+  <div class="d-flex align-items-center gap-2 mb-4">
+    <a href="/" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> К базе</a>
+    <h1 class="page-title h4 mb-0 ms-2">Проверка прокси для Claude</h1>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-body">
+      <p class="text-muted small mb-3">
+        Запросы идут с <strong>вашего компьютера</strong> через локальный Flask на
+        <code>api.anthropic.com</code>. Здесь можно проверить, проходит ли трафик через прокси
+        до Anthropic (без расхода токенов — первая кнопка) и сделать короткий реальный вызов с ключом.
+      </p>
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold" for="pt-proxy">HTTPS-прокси (опционально)</label>
+        <input type="text" class="form-control font-monospace" id="pt-proxy"
+               placeholder="http://127.0.0.1:7890 или http://user:pass@host:8080"
+               autocomplete="off"/>
+        <div class="form-text">
+          Оставьте пустым для прямого подключения или если заданы переменные среды
+          <code>ANTHROPIC_HTTPS_PROXY</code> / <code>HTTPS_PROXY</code> на машине, где запущен Flask.
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold" for="pt-key">API-ключ (только для «Полная проверка»)</label>
+        <input type="password" class="form-control font-monospace" id="pt-key" placeholder="sk-ant-..." autocomplete="off"/>
+        <div class="form-text">На эту страницу ключ не сохраняется — только отправляется в одном запросе.</div>
+      </div>
+
+      <div class="d-flex flex-wrap gap-2">
+        <button type="button" class="btn btn-primary" id="pt-btn-connectivity">
+          <i class="bi bi-lightning-charge me-1"></i>Проверка связи (без ключа)
+        </button>
+        <button type="button" class="btn btn-outline-primary" id="pt-btn-full">
+          <i class="bi bi-robot me-1"></i>Полная проверка с ключом
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="pt-result-card" style="display:none">
+    <div class="card-header d-flex align-items-center gap-2">
+      <i class="bi bi-terminal"></i> Результат
+    </div>
+    <div class="card-body">
+      <div id="result-box" class="mb-0"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const resultCard = $('pt-result-card');
+  const resultBox = $('result-box');
+
+  function showResult(obj, ok) {
+    resultCard.style.display = '';
+    resultBox.className = 'mb-0 ' + (ok ? 'text-success' : 'text-danger');
+    resultBox.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+  }
+
+  async function run(mode) {
+    const proxy_url = ($('pt-proxy').value || '').trim();
+    const api_key = ($('pt-key').value || '').trim();
+    if (mode === 'full' && !api_key) {
+      showResult('Укажите API-ключ для полной проверки.', false);
+      resultCard.style.display = '';
+      return;
+    }
+    resultCard.style.display = '';
+    resultBox.className = 'mb-0 text-secondary';
+    resultBox.textContent = 'Выполняется запрос…';
+
+    try {
+      const body = { mode, proxy_url };
+      if (mode === 'full') body.api_key = api_key;
+      const res = await fetch('/api/proxy-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({ error: 'Некорректный JSON ответа' }));
+      const success = data.ok === true;
+      showResult(data, success);
+    } catch (e) {
+      showResult({ error: String(e.message || e) }, false);
+    }
+  }
+
+  $('pt-btn-connectivity').addEventListener('click', () => run('connectivity'));
+  $('pt-btn-full').addEventListener('click', () => run('full'));
+
+  // Подставить прокси из localStorage базы, если есть
+  const saved = localStorage.getItem('claude_proxy_url');
+  if (saved && $('pt-proxy')) $('pt-proxy').value = saved;
+})();
+</script>
+</body>
+</html>

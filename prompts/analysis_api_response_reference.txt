@@ -1,0 +1,55 @@
+================================================================================
+СПРАВКА (только для человека, в промпт модели не подставляется)
+================================================================================
+Здесь — пояснение к плейсхолдерам {json_output_strict}, {analysis_json_schema},
+{analysis_field_rules}.
+• {json_output_strict} — константа JSON_OUTPUT_STRICT_RU в analysis_pipeline.py.
+• Схема и правила — тексты в prompts/analysis_json_schema.txt и prompts/analysis_field_rules.txt
+  (дублируются в default_analysis_system_prompt.txt; код читает .txt через database.read_*).
+  Запасной текст, если .txt нет: _ANALYSIS_*_FALLBACK в analysis_pipeline.py.
+
+Второй запрос к модели (слияние со справочниками) — схема в конце файла.
+
+Эталон ключей верхнего уровня разметки (без task_text) — словарь task_markup в
+task_analyzer_relevant parts.py; ответ первой модели должен покрывать те же
+смысловые поля + topic_id, solution_steps, final_answer (см. схему в коде).
+================================================================================
+
+─── {json_output_strict} ───
+
+ЖЁСТКОЕ ТРЕБОВАНИЕ К ФОРМАТУ (нарушение = неверный ответ):
+- В выводе должен быть ТОЛЬКО один валидный JSON-объект: от первой «{» до парной «}».
+- ЗАПРЕЩЕНО: любой текст до или после JSON; вступления («Вот JSON», «Результат»); markdown-заголовки; блоки ``` или ```json```.
+- Первый непробельный символ всего ответа — «{», последний значимый — «}».
+- Стандарт JSON: ключи и строки в двойных кавычках; без комментариев // /* */; без хвостовых запятых.
+
+─── {analysis_json_schema} и {analysis_field_rules} ───
+
+В коде заданы явные JSON-шаблоны: полный корневой объект + микро-шаблоны для одного элемента
+каждого массива объектов (content_elements, educational_actions, non_subject_context и т.д.).
+
+См. analysis_pipeline.py — там описаны:
+- обязательные поля (topic_id, content_elements, educational_actions, виджет, шаги решения, bloom_level);
+- расширенные поля как в task_markup: subject, section, topic, grade_level, non_subject_context,
+  non_text_elements, variable_numbers, variable_expressions, structural_elements,
+  requires_external_info, external_info_sources, hidden_assumptions, key_features и т.д.;
+- явное правило: элементы content_elements и educational_actions — только как массивы отдельных JSON-объектов, не строк.
+
+─── Хранение в приложении ───
+
+- analysis_raw_json (в БД) — полный нормализованный JSON ответа первой модели.
+- analysis_result_json — payload с curriculum, normalized (привязка к справочникам), raw_excerpt,
+  task_markup_ref (срез с теми же ключами, что у эталона task_markup).
+- analysis_fallback_json — текстовый снимок + поле разметка_task_markup при отвязанной теме.
+
+Интерфейс «для зрителя» показывает кратко куррикулум и нормализованные списки; полный JSON — в свёрнутом блоке.
+
+================================================================================
+Второй вызов API (merge_catalogs_with_llm) — ответ модели
+================================================================================
+Корневой объект:
+{
+  "content_results": [{"local_i": <int>, "existing_id": <int или null>}],
+  "skill_results": [{"action_index": <int>, "existing_id": <int или null>}]
+}
+local_i должны совпадать с индексами из запроса; existing_id — из candidates или null.

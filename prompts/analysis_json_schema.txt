@@ -1,0 +1,86 @@
+Один корневой JSON-объект. Ключи — snake_case. Соблюдай форму вложенных объектов как в шаблонах ниже (не подставляй строку вместо объекта в массивах).
+
+══════════════════════════════════════════════════════════════════════════════
+ЧЁТКИЙ ШАБЛОН КОРНЯ (валидный JSON; скопируй структуру, замени значения)
+══════════════════════════════════════════════════════════════════════════════
+topic_id — возьми РОВНО ОДНО целое число из блока topics_json в конце промпта (не выдумывай id).
+
+{
+  "topic_id": 0,
+  "subject": "",
+  "section": "",
+  "topic": "",
+  "grade_level": "",
+  "curriculum_standard": "",
+  "source": "",
+  "text_length": 0,
+  "content_elements": [
+    {
+      "name": "обобщённое название без чисел из условия",
+      "stage": "condition",
+      "importance": "key"
+    }
+  ],
+  "non_text_elements": [],
+  "non_subject_context": [
+    {
+      "present": false,
+      "other_subject": null,
+      "plot": null,
+      "replaceable": false
+    }
+  ],
+  "task_type_by_action": ["действие по сути задания"],
+  "task_type_by_widget": "короткий ответ",
+  "answer_format": "",
+  "requires_external_info": false,
+  "external_info_sources": [],
+  "hidden_assumptions": [],
+  "variable_numbers": [],
+  "variable_expressions": [],
+  "structural_elements": [],
+  "educational_actions": [
+    {
+      "action": "инфинитив, обобщённо",
+      "prerequisite": []
+    }
+  ],
+  "key_features": [],
+  "solution_steps": ["шаг 1", "шаг 2"],
+  "final_answer": "",
+  "bloom_level": "применение"
+}
+
+══════════════════════════════════════════════════════════════════════════════
+Шаблоны ОДНОГО элемента для массивов объектов (каждый элемент — отдельный объект)
+══════════════════════════════════════════════════════════════════════════════
+
+Один элемент content_elements (доп. поля в объекте можно):
+{"name": "строка", "stage": "condition", "importance": "key"}
+
+Один элемент educational_actions:
+{"action": "строка", "prerequisite": [0]}
+
+Один элемент non_text_elements:
+{"type": "строка", "function": "содержательная", "description": "строка"}
+
+Один элемент non_subject_context (нет внепредметного сюжета):
+{"present": false, "other_subject": null, "plot": null, "replaceable": false}
+
+Один элемент variable_numbers:
+{"associated_quantity": "строка", "dimension": null, "number_type": "строка", "special_properties": []}
+
+Один элемент variable_expressions:
+{"expression_type": "строка", "key_features": []}
+
+Один элемент structural_elements:
+{"type": "строка", "description": "строка", "count": 1}
+
+══════════════════════════════════════════════════════════════════════════════
+Справка по значениям (после шаблонов)
+══════════════════════════════════════════════════════════════════════════════
+• stage: "condition" | "solution"  • importance: "key" | "auxiliary"
+• task_type_by_widget — ровно одна строка из: короткий ответ | выбор из списка | заполнение пропусков | сортировка по группам | установить соответствие | упорядочивание | развёрнутый ответ
+• bloom_level: запоминание | понимание | применение | анализ | оценка | создание
+• prerequisite — целые индексы шагов с нуля; [] если нет предшественников
+• Пустые разделы: [] или false; ключи верхнего уровня из шаблона корня сохраняй.

@@ -1,0 +1,1294 @@
+# -*- coding: utf-8 -*-
+"""
+Версия analysis_pipeline.py для облачного деплоя.
+Отличие от оригинала: импортирует из migration_database вместо database.
+"""
+from __future__ import annotations
+
+import base64
+import io
+import json
+import re
+import os
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
+
+import requests
+
+try:
+    from PIL import Image, UnidentifiedImageError
+except ImportError:
+    Image = None  # type: ignore[misc, assignment]
+    UnidentifiedImageError = ValueError  # type: ignore[misc, assignment]
+from rapidfuzz import fuzz, process
+
+from migration_database import (
+    get_curriculum_topics,
+    get_curriculum_topic,
+    get_analysis_prompt,
+    read_default_analysis_prompt_file,
+    read_analysis_json_schema_file,
+    read_analysis_field_rules_file,
+    get_task_rowid,
+    clear_task_analysis_links,
+    upsert_content_element,
+    upsert_skill,
+    add_task_content_element,
+    add_task_skill_step,
+    increment_prerequisite,
+    save_task_analysis,
+)
+
+USD_PER_MTOK_INPUT = 3.0
+USD_PER_MTOK_OUTPUT = 15.0
+RUB_PER_USD = 80.0
+
+
+def _proxies(proxy_url: Optional[str]) -> Optional[dict]:
+    url = (proxy_url or "").strip()
+    if not url:
+        url = os.environ.get("ANTHROPIC_HTTPS_PROXY", "").strip() or os.environ.get(
+            "HTTPS_PROXY", ""
+        ).strip()
+    if not url:
+        return None
+    return {"http": url, "https": url}
+
+
+JSON_OUTPUT_STRICT_RU = """ЖЁСТКОЕ ТРЕБОВАНИЕ К ФОРМАТУ (нарушение = неверный ответ):
+- В выводе должен быть ТОЛЬКО один валидный JSON-объект: от первой «{» до парной «}».
+- ЗАПРЕЩЕНО: любой текст до или после JSON; вступления («Вот JSON», «Результат»); markdown-заголовки; блоки ``` или ```json```.
+- Первый непробельный символ всего ответа — «{», последний значимый — «}».
+- Стандарт JSON: ключи и строки в двойных кавычках; без комментариев // /* */; без хвостовых запятых."""
+
+
+def extract_json_object(text: str) -> dict:
+    if not text:
+        raise ValueError("Пустой ответ модели")
+    s = text.strip()
+    if "```json" in s:
+        s = s.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in s:
+        parts = s.split("```", 2)
+        if len(parts) >= 2:
+            s = parts[1].strip()
+            if s.lower().startswith("json"):
+                s = s[4:].lstrip()
+    start = s.find("{")
+    if start < 0:
+        raise ValueError("JSON не найден в ответе")
+    depth = 0
+    for i in range(start, len(s)):
+        if s[i] == "{":
+            depth += 1
+        elif s[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(s[start : i + 1])
+    raise ValueError("Незавершённый JSON")
+
+
+_ALLOWED_STAGES = frozenset({"condition", "solution"})
+_ALLOWED_IMPORTANCE = frozenset({"key", "auxiliary"})
+_ALLOWED_WIDGETS = frozenset(
+    {
+        "короткий ответ",
+        "выбор из списка",
+        "заполнение пропусков",
+        "сортировка по группам",
+        "установить соответствие",
+        "упорядочивание",
+        "развёрнутый ответ",
+    }
+)
+_ALLOWED_BLOOM = frozenset(
+    {
+        "запоминание",
+        "понимание",
+        "применение",
+        "анализ",
+        "оценка",
+        "создание",
+    }
+)
+
+
+def _as_str(x) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, bool):
+        return "true" if x else "false"
+    if isinstance(x, (int, float)):
+        return str(x)
+    return str(x).strip()
+
+
+def _coerce_int(val):
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float) and val == int(val):
+        return int(val)
+    s = str(val).strip()
+    if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+        try:
+            return int(s)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_int_list(items) -> List[int]:
+    out: List[int] = []
+    if not items:
+        return out
+    if not isinstance(items, list):
+        return out
+    for x in items:
+        n = _coerce_int(x)
+        if n is not None:
+            out.append(n)
+    return out
+
+
+TASK_MARKUP_REF_KEYS = (
+    "subject",
+    "section",
+    "topic",
+    "grade_level",
+    "curriculum_standard",
+    "source",
+    "content_elements",
+    "task_type_by_action",
+    "task_type_by_widget",
+    "answer_format",
+    "text_length",
+    "non_text_elements",
+    "non_subject_context",
+    "requires_external_info",
+    "external_info_sources",
+    "hidden_assumptions",
+    "variable_numbers",
+    "variable_expressions",
+    "structural_elements",
+    "educational_actions",
+    "key_features",
+    "bloom_level",
+)
+
+
+def task_markup_slice_from_raw(raw: dict) -> dict:
+    return {k: raw.get(k) for k in TASK_MARKUP_REF_KEYS}
+
+
+def normalize_analysis_raw(raw: dict) -> Tuple[dict, List[str]]:
+    fixes: List[str] = []
+    if not isinstance(raw, dict):
+        fixes.append("корень ответа не объект — обработка невозможна без исправления моделью")
+        return {}, fixes
+
+    out = dict(raw)
+
+    tid = out.get("topic_id")
+    ci = _coerce_int(tid)
+    if ci is not None and ci != tid:
+        out["topic_id"] = ci
+        fixes.append("topic_id приведён к целому числу")
+    elif tid is not None and ci is None:
+        fixes.append("topic_id не удалось привести к int")
+
+    ce = out.get("content_elements")
+    if ce is None:
+        out["content_elements"] = []
+        fixes.append("content_elements отсутствовало — подставлен []")
+    elif not isinstance(ce, list):
+        out["content_elements"] = []
+        fixes.append("content_elements не массив — заменено на []")
+    else:
+        new_ce: List[dict] = []
+        for i, el in enumerate(ce):
+            if isinstance(el, str):
+                new_ce.append({"name": el.strip(), "stage": "condition", "importance": "auxiliary"})
+                fixes.append(f"content_elements[{i}]: строка развёрнута в объект")
+                continue
+            if not isinstance(el, dict):
+                continue
+            name = _as_str(el.get("name") or el.get("label") or el.get("название"))
+            stage = _as_str(el.get("stage")).lower() or "condition"
+            if stage not in _ALLOWED_STAGES:
+                stage = "condition"
+                fixes.append(f"content_elements[{i}]: неизвестный stage — condition")
+            imp = _as_str(el.get("importance")).lower() or "auxiliary"
+            if imp not in _ALLOWED_IMPORTANCE:
+                imp = "auxiliary"
+                fixes.append(f"content_elements[{i}]: неизвестная importance — auxiliary")
+            merged = dict(el)
+            merged["name"] = name
+            merged["stage"] = stage
+            merged["importance"] = imp
+            new_ce.append(merged)
+        out["content_elements"] = new_ce
+
+    ea = out.get("educational_actions")
+    if ea is None:
+        out["educational_actions"] = []
+        fixes.append("educational_actions отсутствовало — []")
+    elif not isinstance(ea, list):
+        out["educational_actions"] = []
+        fixes.append("educational_actions не массив — []")
+    else:
+        new_ea: List[dict] = []
+        for i, ed in enumerate(ea):
+            if isinstance(ed, str):
+                new_ea.append({"action": ed.strip(), "prerequisite": []})
+                fixes.append(f"educational_actions[{i}]: строка → объект с action")
+                continue
+            if not isinstance(ed, dict):
+                continue
+            act = _as_str(ed.get("action") or ed.get("действие"))
+            pre = _coerce_int_list(ed.get("prerequisite") or ed.get("prerequisites") or [])
+            merged = dict(ed)
+            merged["action"] = act
+            merged["prerequisite"] = pre
+            new_ea.append(merged)
+        out["educational_actions"] = new_ea
+
+    tta = out.get("task_type_by_action")
+    if tta is None:
+        out["task_type_by_action"] = []
+        fixes.append("task_type_by_action отсутствовало — []")
+    elif isinstance(tta, str):
+        out["task_type_by_action"] = [tta] if tta.strip() else []
+        fixes.append("task_type_by_action: одна строка → массив из одного элемента")
+    elif isinstance(tta, list):
+        out["task_type_by_action"] = [_as_str(x) for x in tta if _as_str(x)]
+    else:
+        out["task_type_by_action"] = []
+        fixes.append("task_type_by_action: неверный тип — []")
+
+    ttw = out.get("task_type_by_widget")
+    if ttw is None:
+        out["task_type_by_widget"] = "короткий ответ"
+        fixes.append("task_type_by_widget отсутствовало — «короткий ответ»")
+    elif isinstance(ttw, list) and ttw:
+        out["task_type_by_widget"] = _as_str(ttw[0])
+        fixes.append("task_type_by_widget: взят первый элемент списка")
+    else:
+        out["task_type_by_widget"] = _as_str(ttw)
+    w = out["task_type_by_widget"]
+    if w not in _ALLOWED_WIDGETS:
+        lower_map = {a.lower(): a for a in _ALLOWED_WIDGETS}
+        wl = w.lower()
+        if wl in lower_map:
+            out["task_type_by_widget"] = lower_map[wl]
+            fixes.append("task_type_by_widget: нормализован регистр/форма")
+        else:
+            out["task_type_by_widget"] = "короткий ответ"
+            fixes.append("task_type_by_widget: не из списка допустимых — «короткий ответ»")
+
+    af = out.get("answer_format")
+    if af is None:
+        out["answer_format"] = ""
+    else:
+        out["answer_format"] = _as_str(af)
+
+    ss = out.get("solution_steps")
+    if ss is None:
+        out["solution_steps"] = []
+        fixes.append("solution_steps отсутствовало — []")
+    elif not isinstance(ss, list):
+        out["solution_steps"] = [_as_str(ss)] if _as_str(ss) else []
+        fixes.append("solution_steps: скаляр обёрнут в массив")
+    else:
+        out["solution_steps"] = [_as_str(x) for x in ss]
+
+    fa = out.get("final_answer")
+    if fa is None:
+        out["final_answer"] = ""
+    else:
+        out["final_answer"] = _as_str(fa)
+
+    bl = out.get("bloom_level")
+    if bl is None:
+        out["bloom_level"] = "применение"
+        fixes.append("bloom_level отсутствовало — «применение»")
+    else:
+        out["bloom_level"] = _as_str(bl)
+    b = out["bloom_level"]
+    if b not in _ALLOWED_BLOOM:
+        lb = {x.lower(): x for x in _ALLOWED_BLOOM}
+        low = b.lower()
+        if low in lb:
+            out["bloom_level"] = lb[low]
+            fixes.append("bloom_level: нормализован регистр")
+        else:
+            out["bloom_level"] = "применение"
+            fixes.append("bloom_level: не из списка — «применение»")
+
+    for _meta_key in ("subject", "section", "topic", "grade_level", "curriculum_standard", "source"):
+        if out.get(_meta_key) is None:
+            out[_meta_key] = ""
+        else:
+            out[_meta_key] = _as_str(out.get(_meta_key))
+
+    tl = out.get("text_length")
+    if tl is None:
+        out["text_length"] = 0
+    else:
+        try:
+            out["text_length"] = int(float(tl))
+        except (TypeError, ValueError):
+            out["text_length"] = 0
+            fixes.append("text_length не число — 0")
+
+    def _norm_obj_list(key: str) -> None:
+        v = out.get(key)
+        if v is None:
+            out[key] = []
+        elif not isinstance(v, list):
+            out[key] = []
+            fixes.append(f"{key} не массив — []")
+        else:
+            out[key] = [x for x in v if isinstance(x, dict)]
+
+    _norm_obj_list("non_text_elements")
+    _norm_obj_list("variable_numbers")
+    _norm_obj_list("variable_expressions")
+    _norm_obj_list("structural_elements")
+
+    nsc = out.get("non_subject_context")
+    if nsc is None or not isinstance(nsc, list) or len(nsc) == 0:
+        out["non_subject_context"] = [{"present": False, "other_subject": None, "plot": None, "replaceable": False}]
+        if nsc is not None and not isinstance(nsc, list):
+            fixes.append("non_subject_context не массив — объект по умолчанию")
+    else:
+        norm_nsc: List[dict] = []
+        for it in nsc:
+            if not isinstance(it, dict):
+                continue
+            d = dict(it)
+            d["present"] = bool(d.get("present", False))
+            os_ = d.get("other_subject")
+            d["other_subject"] = None if os_ is None else (_as_str(os_) or None)
+            pl = d.get("plot")
+            d["plot"] = None if pl is None else (_as_str(pl) or None)
+            d["replaceable"] = bool(d.get("replaceable", False))
+            norm_nsc.append(d)
+        out["non_subject_context"] = norm_nsc or [{"present": False, "other_subject": None, "plot": None, "replaceable": False}]
+
+    rei = out.get("requires_external_info")
+    if rei is None:
+        out["requires_external_info"] = False
+    else:
+        out["requires_external_info"] = bool(rei)
+
+    def _norm_str_list_key(key: str) -> None:
+        v = out.get(key)
+        if v is None:
+            out[key] = []
+        elif not isinstance(v, list):
+            s = _as_str(v)
+            out[key] = [s] if s else []
+            fixes.append(f"{key}: скаляр обёрнут в массив")
+        else:
+            out[key] = [_as_str(x) for x in v if _as_str(x)]
+
+    _norm_str_list_key("external_info_sources")
+    _norm_str_list_key("hidden_assumptions")
+    _norm_str_list_key("key_features")
+
+    return out, fixes
+
+
+def validate_analysis_raw(raw: dict) -> List[str]:
+    errs: List[str] = []
+    if not isinstance(raw, dict):
+        return ["корень не объект"]
+    if raw.get("topic_id") is None:
+        errs.append("отсутствует или пустой topic_id")
+    elif not isinstance(raw.get("topic_id"), int):
+        errs.append("topic_id должен быть целым числом")
+    for key, label in (
+        ("content_elements", "content_elements"),
+        ("educational_actions", "educational_actions"),
+        ("task_type_by_action", "task_type_by_action"),
+        ("solution_steps", "solution_steps"),
+    ):
+        if not isinstance(raw.get(key), list):
+            errs.append(f"{label} должен быть массивом")
+    if not isinstance(raw.get("task_type_by_widget"), str):
+        errs.append("task_type_by_widget должен быть строкой")
+    if not isinstance(raw.get("answer_format"), str):
+        errs.append("answer_format должен быть строкой")
+    if not isinstance(raw.get("final_answer"), str):
+        errs.append("final_answer должен быть строкой")
+    if not isinstance(raw.get("bloom_level"), str):
+        errs.append("bloom_level должен быть строкой")
+    for i, el in enumerate(raw.get("content_elements") or []):
+        if not isinstance(el, dict):
+            errs.append(f"content_elements[{i}] должен быть объектом")
+        elif not _as_str(el.get("name")):
+            errs.append(f"content_elements[{i}]: нужен непустой name")
+    for i, ed in enumerate(raw.get("educational_actions") or []):
+        if not isinstance(ed, dict):
+            errs.append(f"educational_actions[{i}] должен быть объектом")
+        elif not _as_str(ed.get("action")):
+            errs.append(f"educational_actions[{i}]: нужен непустой action")
+        elif not isinstance(ed.get("prerequisite"), list):
+            errs.append(f"educational_actions[{i}]: prerequisite должен быть массивом")
+    for key in ("non_text_elements", "variable_numbers", "variable_expressions", "structural_elements"):
+        v = raw.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, list):
+            errs.append(f"{key} должен быть массивом")
+        else:
+            for j, it in enumerate(v):
+                if not isinstance(it, dict):
+                    errs.append(f"{key}[{j}] должен быть объектом")
+    nsc = raw.get("non_subject_context")
+    if nsc is not None:
+        if not isinstance(nsc, list):
+            errs.append("non_subject_context должен быть массивом")
+        else:
+            for j, it in enumerate(nsc):
+                if not isinstance(it, dict):
+                    errs.append(f"non_subject_context[{j}] должен быть объектом")
+    if raw.get("requires_external_info") is not None and not isinstance(raw.get("requires_external_info"), bool):
+        errs.append("requires_external_info должен быть boolean")
+    for key in ("external_info_sources", "hidden_assumptions", "key_features"):
+        v = raw.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, list):
+            errs.append(f"{key} должен быть массивом")
+    if raw.get("text_length") is not None and not isinstance(raw.get("text_length"), int):
+        errs.append("text_length должен быть целым числом")
+    return errs
+
+
+_ANALYSIS_JSON_SCHEMA_FALLBACK = """Один корневой JSON-объект. Ключи — snake_case."""
+_ANALYSIS_FIELD_RULES_FALLBACK = """Структура ответа — как в блоке «чёткий шаблон корня»."""
+
+
+def get_analysis_json_schema_text() -> str:
+    t = read_analysis_json_schema_file()
+    if t and t.strip():
+        return t.strip()
+    return _ANALYSIS_JSON_SCHEMA_FALLBACK.strip()
+
+
+def get_analysis_field_rules_text() -> str:
+    t = read_analysis_field_rules_file()
+    if t and t.strip():
+        return t.strip()
+    return _ANALYSIS_FIELD_RULES_FALLBACK.strip()
+
+
+ANALYSIS_PLACEHOLDERS_HELP = """Подстановки сервера (оставляйте имя в фигурных скобках ровно как указано):
+
+{topics_json} — JSON-массив тем из справочника.
+{meta_json} — JSON с полями импорта.
+{kes} — строка КЭС задания или «—».
+{exam_type}, {task_number}, {answer_type}, {answer_format_import}, {subject_import} — отдельные поля.
+{json_output_strict} — жёсткие правила формата.
+{analysis_json_schema} — описание структуры JSON-ответа.
+{analysis_field_rules} — расшифровка полей.
+{analysis_methodology} — блок методики из кода."""
+
+
+ANALYSIS_METHODOLOGY_TASK_ANALYZER_RU = """
+══════════════════════════════════════════════════════════════════════════════
+КАК АНАЛИЗИРОВАТЬ УСЛОВИЕ И РЕШЕНИЕ И ЧТО СОХРАНЯТЬ В ПОЛЯХ (методика task_analyzer)
+══════════════════════════════════════════════════════════════════════════════
+""".strip()
+
+
+_DEFAULT_TEMPLATE_SHELL_HEAD = """Роль: ты — педагогический ассистент-аналитик учебных заданий по математике.
+
+Входные переменные:
+* meta_json: {meta_json}
+* kes: {kes}
+* topics_json: см. блок в конце промпта.
+
+"""
+
+_DEFAULT_TEMPLATE_SHELL_TAIL = """
+
+Требования к выводу:
+{json_output_strict}
+
+Структура JSON ответа:
+{analysis_json_schema}
+
+Правила полей:
+{analysis_field_rules}
+
+СПРАВОЧНИК ТЕМ:
+{topics_json}
+
+СЛУЖЕБНЫЕ ДАННЫЕ: {meta_json}
+КЭС: {kes}
+
+Итог: весь ответ — только один JSON-объект, без markdown, первый символ «{», последний «}».
+"""
+
+
+def load_default_analysis_system_template() -> str:
+    raw = read_default_analysis_prompt_file()
+    if raw and raw.strip():
+        return raw.strip()
+    return _DEFAULT_TEMPLATE_SHELL_HEAD + ANALYSIS_METHODOLOGY_TASK_ANALYZER_RU + _DEFAULT_TEMPLATE_SHELL_TAIL
+
+
+def repair_analysis_json_via_llm(
+    api_key: str,
+    model: str,
+    proxy_url: Optional[str],
+    *,
+    raw_model_text: str,
+    reason: str,
+    partial: Optional[dict] = None,
+) -> Tuple[str, Dict[str, int]]:
+    system = "\n\n".join([
+        JSON_OUTPUT_STRICT_RU,
+        "Ты исправляешь ответ предыдущей модели. Верни ровно один JSON-объект по схеме ниже.",
+        get_analysis_json_schema_text(),
+        "Сохрани смысл разметки; заполни отсутствующие обязательные поля разумными значениями.",
+    ])
+    parts = [f"Причина исправления: {reason}\n"]
+    if partial is not None:
+        parts.append("Частично восстановленный JSON:\n" + json.dumps(partial, ensure_ascii=False)[:10000])
+    else:
+        parts.append("Сырой ответ модели:\n" + (raw_model_text or "")[:12000])
+    user = "\n".join(parts)
+    return anthropic_messages(api_key, model,
+        [{"role": "user", "content": [{"type": "text", "text": user}]}],
+        system, max_tokens=8192, proxy_url=proxy_url)
+
+
+def normalize_merge_mapping(mapping: dict) -> Tuple[dict, List[str]]:
+    fixes: List[str] = []
+    if not isinstance(mapping, dict):
+        return {"content_results": [], "skill_results": []}, ["mapping не объект"]
+    out = dict(mapping)
+    for key, idx_key in (("content_results", "local_i"), ("skill_results", "action_index")):
+        rows = out.get(key)
+        if rows is None:
+            out[key] = []
+            fixes.append(f"{key} отсутствовало — []")
+        elif not isinstance(rows, list):
+            out[key] = []
+            fixes.append(f"{key} не массив — []")
+        else:
+            new_rows: List[dict] = []
+            for i, row in enumerate(rows):
+                if not isinstance(row, dict):
+                    continue
+                r = dict(row)
+                ik = r.get(idx_key)
+                ci = _coerce_int(ik)
+                if ci is not None:
+                    r[idx_key] = ci
+                elif ik is not None:
+                    fixes.append(f"{key}[{i}]: {idx_key} не число — строка пропущена")
+                    continue
+                else:
+                    continue
+                ex = r.get("existing_id")
+                if ex is None or (isinstance(ex, str) and ex.lower() == "null"):
+                    r["existing_id"] = None
+                else:
+                    ei = _coerce_int(ex)
+                    r["existing_id"] = ei
+                    if ei is None and ex is not None:
+                        fixes.append(f"{key}[{i}]: existing_id не int — обнулено")
+                        r["existing_id"] = None
+                new_rows.append(r)
+            out[key] = new_rows
+    return out, fixes
+
+
+MERGE_JSON_SCHEMA_TEXT = """Корневой объект:
+{
+  "content_results": [{"local_i": <int>, "existing_id": <int или null>}],
+  "skill_results": [{"action_index": <int>, "existing_id": <int или null>}]
+}"""
+
+
+def repair_merge_mapping_via_llm(
+    api_key: str,
+    model: str,
+    proxy_url: Optional[str],
+    *,
+    failed_text: str,
+    reason: str,
+    payload_user: str,
+) -> Tuple[str, Dict[str, int]]:
+    system = "\n\n".join([
+        JSON_OUTPUT_STRICT_RU,
+        "Ты исправляешь ответ сопоставления со справочником.",
+        MERGE_JSON_SCHEMA_TEXT,
+        "Верни только один JSON-объект, без текста вокруг.",
+    ])
+    user = f"{reason}\n\nЗапрос был:\n{payload_user[:8000]}\n\nНекорректный ответ:\n{failed_text[:6000]}"
+    return anthropic_messages(api_key, model,
+        [{"role": "user", "content": [{"type": "text", "text": user}]}],
+        system, max_tokens=4096, proxy_url=proxy_url)
+
+
+_ANTHROPIC_IMAGE_MIME_ALLOWED = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+
+
+def _normalize_image_mime(mime: str) -> str:
+    m = (mime or "").strip().lower().split(";", 1)[0].strip()
+    if m in ("image/jpg", "image/pjpeg", "image/x-jpeg"):
+        return "image/jpeg"
+    return m or "image/png"
+
+
+def _image_bytes_to_png_b64(raw: bytes) -> Optional[str]:
+    if Image is None:
+        return None
+    try:
+        im = Image.open(io.BytesIO(raw))
+        im.load()
+    except (UnidentifiedImageError, OSError, ValueError):
+        return None
+    if im.mode == "RGBA":
+        pass
+    elif im.mode == "LA":
+        im = im.convert("RGBA")
+    elif im.mode == "P" and "transparency" in im.info:
+        im = im.convert("RGBA")
+    elif im.mode == "P":
+        im = im.convert("RGB")
+    elif im.mode in ("L", "1"):
+        im = im.convert("RGB")
+    elif im.mode != "RGB":
+        im = im.convert("RGB")
+    buf = io.BytesIO()
+    im.save(buf, format="PNG", optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _prepare_image_for_anthropic(mime: str, b64: str) -> Optional[Tuple[str, str]]:
+    m = _normalize_image_mime(mime)
+    if m in _ANTHROPIC_IMAGE_MIME_ALLOWED:
+        return m, b64
+    try:
+        raw = base64.b64decode(b64, validate=False)
+    except (ValueError, TypeError):
+        return None
+    png_b64 = _image_bytes_to_png_b64(raw)
+    if png_b64:
+        return "image/png", png_b64
+    return None
+
+
+def _lookup_image_payload(images: dict, fn: str) -> Optional[dict]:
+    if not fn or not isinstance(images, dict):
+        return None
+    if fn in images and isinstance(images[fn], dict):
+        return images[fn]
+    norm = fn.replace("\\", "/")
+    base = os.path.basename(norm)
+    if base in images and isinstance(images[base], dict):
+        return images[base]
+    norm_lower = norm.lower()
+    base_lower = base.lower()
+    found: Optional[dict] = None
+    for k, v in images.items():
+        if not isinstance(v, dict):
+            continue
+        kl = str(k).replace("\\", "/").lower()
+        if kl == norm_lower:
+            return v
+        if kl.endswith("/" + base_lower) or os.path.basename(kl) == base_lower:
+            found = v
+    return found
+
+
+def collect_images_for_analysis_task(task: dict) -> dict:
+    out: dict = {}
+    for name, data in (task.get("images") or {}).items():
+        if isinstance(data, dict) and data.get("data"):
+            out[str(name)] = data
+    for name, data in (task.get("attachments") or {}).items():
+        if not isinstance(data, dict) or not data.get("data"):
+            continue
+        mime = (data.get("mime") or "").lower()
+        nl = str(name).lower()
+        if mime.startswith("image/") or nl.endswith(
+            (".png", ".jpeg", ".jpg", ".gif", ".webp", ".bmp", ".svg", ".tif", ".tiff")
+        ):
+            key = str(name)
+            if key not in out:
+                out[key] = data
+    return out
+
+
+def _split_text_and_images(body: str, images: dict) -> Tuple[str, List[Tuple[str, str, str]], List[str]]:
+    if not body:
+        return "", [], []
+    found: List[Tuple[str, str, str]] = []
+    missing: List[str] = []
+    pattern = re.compile(r"\[img(?:_inline)?:([^\]]+)\]")
+
+    def repl(m):
+        fn = m.group(1).strip()
+        data = _lookup_image_payload(images or {}, fn)
+        if data and data.get("data"):
+            mime = data.get("mime") or "image/png"
+            found.append((mime, data["data"], fn))
+            return f"[изображение {len(found)}: {fn}]"
+        if fn not in missing:
+            missing.append(fn)
+        return f"[рисунок не передан в API — нет файла «{fn}»]"
+
+    text = pattern.sub(repl, body)
+    return text, found, missing
+
+
+def build_message_content(text: str, images: dict, max_images: int = 10) -> List[dict]:
+    clean, imgs, missing = _split_text_and_images(text, images)
+    conv_notes: List[str] = []
+    lead: List[str] = []
+    if missing:
+        lead.append(
+            "ВНИМАНИЕ: для вставок изображений нет бинарных данных: "
+            + ", ".join(f"«{x}»" for x in missing)
+        )
+    image_blocks: List[dict] = []
+    for mime, b64, fn in imgs[:max_images]:
+        prepared = _prepare_image_for_anthropic(mime, b64)
+        if prepared is None:
+            conv_notes.append(f"[«{fn}» не отправлен — неподдерживаемый формат]")
+            continue
+        out_mime, out_b64 = prepared
+        image_blocks.append({"type": "image", "source": {"type": "base64", "media_type": out_mime, "data": out_b64}})
+    if conv_notes:
+        lead.extend(conv_notes)
+    body_text = (clean or "").strip()
+    if lead:
+        body_text = "\n".join(lead) + ("\n\n" + body_text if body_text else "")
+    blocks: List[dict] = []
+    if body_text:
+        blocks.append({"type": "text", "text": body_text})
+    blocks.extend(image_blocks)
+    if not blocks:
+        blocks.append({"type": "text", "text": "(текст задания отсутствует)"})
+    return blocks
+
+
+def anthropic_messages(
+    api_key: str,
+    model: str,
+    messages: List[dict],
+    system: str,
+    max_tokens: int = 8192,
+    proxy_url: Optional[str] = None,
+) -> Tuple[str, Dict[str, int]]:
+    proxies = _proxies(proxy_url)
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={"model": model, "max_tokens": max_tokens, "system": system, "messages": messages},
+        proxies=proxies,
+        timeout=300,
+    )
+    if resp.status_code != 200:
+        try:
+            err = resp.json()
+        except Exception:
+            err = {"raw": resp.text[:2000]}
+        raise RuntimeError(f"Anthropic HTTP {resp.status_code}: {json.dumps(err, ensure_ascii=False)}")
+    data = resp.json()
+    text_parts = []
+    for block in data.get("content") or []:
+        if block.get("type") == "text":
+            text_parts.append(block.get("text") or "")
+    text = "\n".join(text_parts)
+    usage = data.get("usage") or {}
+    u = {
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+    }
+    return text, u
+
+
+def usage_cost_usd(inp: int, out: int) -> float:
+    return (inp / 1_000_000.0) * USD_PER_MTOK_INPUT + (out / 1_000_000.0) * USD_PER_MTOK_OUTPUT
+
+
+def usage_cost_rub(inp: int, out: int) -> float:
+    return usage_cost_usd(inp, out) * RUB_PER_USD
+
+
+def _topics_payload_for_prompt(topics: List[dict]) -> List[dict]:
+    return [
+        {
+            "topic_id": t["id"],
+            "section": t["section"],
+            "subsection": t.get("subsection") or "",
+            "topic": t["topic"],
+            "grade_class": t["grade_class"],
+            "description": (t.get("topic_description") or "")[:500],
+        }
+        for t in topics
+    ]
+
+
+def _topics_json_for_prompt(topics: List[dict]) -> str:
+    return json.dumps(_topics_payload_for_prompt(topics), ensure_ascii=False)
+
+
+def substitute_analysis_system_template(template: str, topics: List[dict], kes: str, meta: dict) -> str:
+    topics_json = _topics_json_for_prompt(topics)
+    meta_json = json.dumps(meta, ensure_ascii=False)
+    repl = {
+        "{topics_json}": topics_json,
+        "{meta_json}": meta_json,
+        "{kes}": kes or "—",
+        "{json_output_strict}": JSON_OUTPUT_STRICT_RU,
+        "{analysis_json_schema}": get_analysis_json_schema_text(),
+        "{analysis_field_rules}": get_analysis_field_rules_text(),
+        "{exam_type}": _as_str(meta.get("exam_type")),
+        "{task_number}": _as_str(meta.get("task_number")),
+        "{answer_type}": _as_str(meta.get("answer_type")),
+        "{answer_format_import}": _as_str(meta.get("answer_format_import")),
+        "{subject_import}": _as_str(meta.get("subject_import")),
+        "{analysis_methodology}": ANALYSIS_METHODOLOGY_TASK_ANALYZER_RU,
+    }
+    out = template
+    for key in sorted(repl.keys(), key=len, reverse=True):
+        out = out.replace(key, repl[key])
+    return out
+
+
+def _legacy_build_system_prompt(topics: List[dict], base: str, kes: str, meta: dict) -> str:
+    topics_json = _topics_json_for_prompt(topics)
+    meta_json = json.dumps(meta, ensure_ascii=False)
+    b = (base or "").strip()
+    if not b:
+        b = DEFAULT_ANALYSIS_PROMPT_BODY
+    task_block = f"СЛУЖЕБНЫЕ ДАННЫЕ ЗАДАНИЯ:\n{meta_json}\n\nКЭС: {kes or '—'}"
+    suffix = (
+        f"\n\n{JSON_OUTPUT_STRICT_RU}\n\n"
+        + ANALYSIS_METHODOLOGY_TASK_ANALYZER_RU
+        + f"\n\nСПРАВОЧНИК ТЕМ:\n{topics_json}\n\n{task_block}\n\n"
+        + "СТРУКТУРА JSON:\n" + get_analysis_json_schema_text()
+        + "\n\nПРАВИЛА ПОЛЕЙ:\n" + get_analysis_field_rules_text()
+        + "\n\nПОВТОР: весь ответ — только один JSON-объект.\n"
+    )
+    return b + suffix
+
+
+def build_analysis_system_prompt(custom_template: str, topics: List[dict], kes: str, meta: dict) -> str:
+    t = (custom_template or "").strip()
+    if not t:
+        t = load_default_analysis_system_template()
+    if "{topics_json}" in t:
+        return substitute_analysis_system_template(t, topics, kes, meta)
+    return _legacy_build_system_prompt(topics, t, kes, meta)
+
+
+USER_MESSAGE_ANALYSIS_DESCRIPTION = """Роль user — одно сообщение с несколькими блоками content."""
+
+
+def build_analysis_prompt_page_payload() -> Dict[str, str]:
+    body, updated = get_analysis_prompt()
+    return {
+        "body": body or "",
+        "updated_at": updated,
+        "default_system_template": load_default_analysis_system_template(),
+        "placeholders_help": ANALYSIS_PLACEHOLDERS_HELP,
+        "user_message_description": USER_MESSAGE_ANALYSIS_DESCRIPTION,
+    }
+
+
+def build_analysis_fallback_snapshot(topic_id, topic_row, raw, normalized, result_payload) -> str:
+    ce = []
+    for el in normalized.get("content_elements") or []:
+        ce.append({"название": el.get("label"), "важность": el.get("importance"), "этап": el.get("stage")})
+    sk = []
+    for step in normalized.get("skill_steps") or []:
+        sk.append({"действие": step.get("label"), "пререквизиты_к_индексам_шагов": step.get("prereq_indices") or []})
+    payload = {
+        "сохранено_utc": datetime.now(timezone.utc).isoformat(),
+        "topic_id_на_момент_анализа": topic_id,
+        "куррикулум_текстом": {
+            "предмет_в_строке_справочника": topic_row.get("subject"),
+            "раздел": topic_row.get("section"),
+            "подраздел": topic_row.get("subsection") or "",
+            "тема": topic_row.get("topic"),
+            "класс": str(topic_row.get("grade_class") or ""),
+            "описание_темы": (topic_row.get("topic_description") or "")[:2000],
+        },
+        "элементы_содержания": ce,
+        "навыки_по_шагам_решения": sk,
+        "тип_вопроса_и_формат": result_payload.get("raw_excerpt") or {},
+        "разметка_task_markup": task_markup_slice_from_raw(raw),
+        "шаги_решения_текстом": raw.get("solution_steps") if isinstance(raw.get("solution_steps"), list) else [],
+        "ответ": raw.get("final_answer"),
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+DEFAULT_ANALYSIS_PROMPT_BODY = """Ты аналитик учебных заданий по математике (Россия, школа)."""
+
+
+def _is_math_subject(subject: str) -> bool:
+    s = (subject or "").strip().lower()
+    if not s:
+        return True
+    if "матем" in s:
+        return True
+    if s == "math" or s == "maths" or s.startswith("math "):
+        return True
+    if "mathematics" in s:
+        return True
+    return False
+
+
+def run_task_analysis(
+    task: dict,
+    api_key: str,
+    model: str = "claude-sonnet-4-0",
+    proxy_url: Optional[str] = None,
+) -> dict:
+    subject = (task.get("subject") or "").strip()
+    if not _is_math_subject(subject):
+        return {"ok": False, "error": "Пока анализ только для математики."}
+
+    topics = get_curriculum_topics(None)
+    if not topics:
+        return {"ok": False, "error": "Справочник тем пуст. Добавьте темы на странице «Темы»."}
+
+    custom_prompt, _ = get_analysis_prompt()
+    body_text = (task.get("formatted_text") or "").strip() or (task.get("text") or "")
+    images = collect_images_for_analysis_task(task)
+    kes = (task.get("kes") or "").strip()
+    solution_in = (task.get("solution") or "").strip()
+
+    meta = {
+        "exam_type": task.get("exam_type"),
+        "task_number": task.get("task_number"),
+        "answer_type": task.get("answer_type"),
+        "answer_format_import": task.get("answer_format"),
+        "subject_import": task.get("subject"),
+    }
+
+    system = build_analysis_system_prompt(custom_prompt, topics, kes, meta)
+    user_parts = []
+    user_parts.extend(build_message_content(body_text, images))
+    sol_block = (
+        f"\n\n---\nТЕКСТ РЕШЕНИЯ:\n{solution_in}"
+        if solution_in
+        else "\n\n---\nРешения нет — реши задание и заполни solution_steps и final_answer."
+    )
+    user_parts.append({"type": "text", "text": sol_block})
+    messages = [{"role": "user", "content": user_parts}]
+
+    usage_total = {"input_tokens": 0, "output_tokens": 0}
+    try:
+        text1, u1 = anthropic_messages(api_key, model, messages, system, max_tokens=8192, proxy_url=proxy_url)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    usage_total["input_tokens"] += u1["input_tokens"]
+    usage_total["output_tokens"] += u1["output_tokens"]
+
+    raw: Optional[dict] = None
+    parse_err: Optional[str] = None
+    mech_notes: List[str] = []
+    try:
+        raw = extract_json_object(text1)
+    except Exception as e:
+        parse_err = str(e)
+
+    if raw is None:
+        try:
+            t_fix, u_fix = repair_analysis_json_via_llm(api_key, model, proxy_url,
+                raw_model_text=text1, reason=f"парсинг: {parse_err}", partial=None)
+            usage_total["input_tokens"] += u_fix["input_tokens"]
+            usage_total["output_tokens"] += u_fix["output_tokens"]
+            raw = extract_json_object(t_fix)
+            mech_notes.append("JSON восстановлен повторным вызовом модели")
+        except Exception as e2:
+            return {
+                "ok": False,
+                "error": f"Не удалось разобрать JSON: {parse_err}; исправление: {e2}",
+                "raw_text": text1[:4000],
+                "usage": usage_total,
+                "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+            }
+
+    raw, fixes = normalize_analysis_raw(raw)
+    mech_notes.extend(fixes)
+    val_errs = validate_analysis_raw(raw)
+    if val_errs:
+        try:
+            t_fix2, u_fix2 = repair_analysis_json_via_llm(api_key, model, proxy_url,
+                raw_model_text=text1, reason="валидация: " + "; ".join(val_errs), partial=raw)
+            usage_total["input_tokens"] += u_fix2["input_tokens"]
+            usage_total["output_tokens"] += u_fix2["output_tokens"]
+            raw = extract_json_object(t_fix2)
+            raw, fixes2 = normalize_analysis_raw(raw)
+            mech_notes.extend(fixes2)
+            mech_notes.append("JSON скорректирован повторным вызовом модели")
+            val_errs = validate_analysis_raw(raw)
+        except Exception as e3:
+            val_errs.append(f"исправление структуры: {e3}")
+
+    if val_errs:
+        return {
+            "ok": False,
+            "error": "Структура JSON анализа некорректна: " + "; ".join(val_errs),
+            "mechanical_fixes": mech_notes,
+            "raw_text": text1[:4000],
+            "usage": usage_total,
+            "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+        }
+
+    topic_id = raw.get("topic_id")
+    try:
+        topic_id = int(topic_id)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "error": f"Некорректный topic_id: {topic_id!r}",
+            "usage": usage_total,
+            "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+        }
+
+    topic_row = get_curriculum_topic(topic_id)
+    if not topic_row:
+        return {
+            "ok": False,
+            "error": f"topic_id {topic_id} не найден в справочнике",
+            "usage": usage_total,
+            "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+        }
+
+    merge_usage = merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url)
+    mu = merge_usage.get("usage") or {}
+    usage_total["input_tokens"] += int(mu.get("input_tokens") or 0)
+    usage_total["output_tokens"] += int(mu.get("output_tokens") or 0)
+
+    normalized = merge_usage["normalized"]
+    task_rowid = get_task_rowid(task.get("id"), task.get("group_id"), task.get("group_position"))
+    if not task_rowid:
+        return {"ok": False, "error": "Не найден rowid задания"}
+
+    clear_task_analysis_links(task_rowid)
+    for el in normalized.get("content_elements") or []:
+        add_task_content_element(task_rowid, el["id"], el.get("importance"), el.get("stage"))
+
+    idx_map = normalized.get("skill_id_by_action_index") or {}
+    for step in normalized.get("skill_steps") or []:
+        add_task_skill_step(task_rowid, step["order"], step["skill_id"], step.get("prereq_indices"))
+
+    for step in normalized.get("skill_steps") or []:
+        sid = step["skill_id"]
+        for pi in step.get("prereq_indices") or []:
+            if isinstance(pi, int) and pi in idx_map:
+                increment_prerequisite(idx_map[pi], sid, 1)
+
+    new_solution = raw.get("solution_steps")
+    if isinstance(new_solution, list):
+        solution_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(new_solution) if s)
+    else:
+        solution_text = ""
+    fa = raw.get("final_answer")
+    if fa:
+        solution_text = (solution_text + "\n\nОтвет: " + str(fa)).strip()
+
+    usage_json = {
+        "primary": u1,
+        "merge": merge_usage.get("usage") or {"input_tokens": 0, "output_tokens": 0},
+        "totals": usage_total,
+        "cost_usd": usage_cost_usd(usage_total["input_tokens"], usage_total["output_tokens"]),
+        "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+        "pricing_note": f"оценка по ${USD_PER_MTOK_INPUT}/M in, ${USD_PER_MTOK_OUTPUT}/M out, курс {RUB_PER_USD} ₽/$",
+    }
+    if mech_notes:
+        usage_json["json_normalization_notes"] = mech_notes
+
+    result_payload = {
+        "topic_id": topic_id,
+        "curriculum": {
+            "section": topic_row["section"],
+            "subsection": topic_row.get("subsection"),
+            "topic": topic_row["topic"],
+            "grade_class": topic_row["grade_class"],
+        },
+        "normalized": normalized,
+        "raw_excerpt": {
+            k: raw.get(k)
+            for k in ("task_type_by_action", "task_type_by_widget", "answer_format", "bloom_level")
+        },
+        "task_markup_ref": task_markup_slice_from_raw(raw),
+    }
+
+    fallback_json = build_analysis_fallback_snapshot(topic_id, topic_row, raw, normalized, result_payload)
+
+    save_task_analysis(
+        task.get("id"), task.get("group_id"), task.get("group_position"),
+        topic_id, topic_row["section"], topic_row.get("subsection") or "",
+        topic_row["topic"], str(topic_row["grade_class"]),
+        solution_text or None,
+        json.dumps(raw, ensure_ascii=False),
+        json.dumps(result_payload, ensure_ascii=False),
+        json.dumps(usage_json, ensure_ascii=False),
+        fallback_json,
+    )
+
+    return {
+        "ok": True,
+        "result": result_payload,
+        "usage": usage_total,
+        "cost_rub": usage_json["cost_rub"],
+        "cost_usd": usage_json["cost_usd"],
+        "usage_detail": usage_json,
+    }
+
+
+def merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url):
+    from migration_database import get_conn
+
+    conn = get_conn()
+    ce_rows = conn.execute("SELECT id, label_display FROM content_element_defs").fetchall()
+    sk_rows = conn.execute("SELECT id, label_display FROM skill_defs").fetchall()
+    conn.close()
+
+    ce_choices = {r[1]: r[0] for r in ce_rows}
+    sk_choices = {r[1]: r[0] for r in sk_rows}
+    ce_list = list(ce_choices.keys())
+    sk_list = list(sk_choices.keys())
+
+    content_items: List[dict] = []
+    for li, el in enumerate(raw.get("content_elements") or []):
+        name = (el.get("name") or "").strip()
+        if not name:
+            continue
+        cand = []
+        if ce_list:
+            for m, score, _ in process.extract(name, ce_list, scorer=fuzz.token_sort_ratio, limit=5):
+                if score >= 55:
+                    cand.append({"id": ce_choices[m], "label": m, "score": score})
+        content_items.append({"local_i": li, "text": name, "stage": el.get("stage"),
+                               "importance": el.get("importance"), "candidates": cand})
+
+    skill_items: List[dict] = []
+    for ai, ed in enumerate(raw.get("educational_actions") or []):
+        act = (ed.get("action") or "").strip()
+        if not act:
+            continue
+        cand = []
+        if sk_list:
+            for m, score, _ in process.extract(act, sk_list, scorer=fuzz.token_sort_ratio, limit=5):
+                if score >= 55:
+                    cand.append({"id": sk_choices[m], "label": m, "score": score})
+        skill_items.append({"action_index": ai, "text": act,
+                            "prerequisite": ed.get("prerequisite") or [], "candidates": cand})
+
+    if not content_items and not skill_items:
+        return {"normalized": {"content_elements": [], "skill_steps": []},
+                "usage": {"input_tokens": 0, "output_tokens": 0}}
+
+    user = json.dumps({
+        "instructions": (
+            f"{JSON_OUTPUT_STRICT_RU} Верни только один JSON-объект (без markdown), строго вида:\n"
+            '{"content_results":[{"local_i":0,"existing_id":5}...],'
+            '"skill_results":[{"action_index":0,"existing_id":12}...]}\n'
+            "existing_id — целое id из candidates при совпадении смысла, иначе null."
+        ),
+        "content": content_items,
+        "skills": skill_items,
+    }, ensure_ascii=False)
+
+    sys = "\n\n".join([
+        JSON_OUTPUT_STRICT_RU,
+        "Ты сопоставляешь формулировки с элементами справочника.",
+        MERGE_JSON_SCHEMA_TEXT,
+        "Ответ — только один JSON-объект.",
+    ])
+
+    text, u = anthropic_messages(api_key, model,
+        [{"role": "user", "content": [{"type": "text", "text": user}]}],
+        sys, max_tokens=4096, proxy_url=proxy_url)
+
+    mapping: dict = {}
+    try:
+        mapping = extract_json_object(text)
+    except Exception as parse_ex:
+        try:
+            text2, u2 = repair_merge_mapping_via_llm(api_key, model, proxy_url,
+                failed_text=text, reason=f"парсинг merge JSON: {parse_ex}", payload_user=user)
+            u["input_tokens"] += u2["input_tokens"]
+            u["output_tokens"] += u2["output_tokens"]
+            mapping = extract_json_object(text2)
+        except Exception:
+            mapping = {}
+
+    mapping, _ = normalize_merge_mapping(mapping)
+
+    cr = {}
+    sr = {}
+    if isinstance(mapping, dict):
+        for row in mapping.get("content_results") or []:
+            if row.get("local_i") is not None:
+                cr[int(row["local_i"])] = row.get("existing_id")
+        for row in mapping.get("skill_results") or []:
+            if row.get("action_index") is not None:
+                sr[int(row["action_index"])] = row.get("existing_id")
+
+    normalized_content = []
+    for it in content_items:
+        li = it["local_i"]
+        existing = cr.get(li)
+        try:
+            eid = int(existing) if existing is not None and str(existing).lower() != "null" else None
+        except (TypeError, ValueError):
+            eid = None
+        if eid is None:
+            eid = upsert_content_element(it["text"], topic_id)
+        normalized_content.append({"id": eid, "label": it["text"],
+                                    "importance": it.get("importance"), "stage": it.get("stage")})
+
+    skill_steps_out: List[dict] = []
+    skill_id_by_action_index: Dict[int, int] = {}
+
+    for it in skill_items:
+        ai = it["action_index"]
+        existing = sr.get(ai)
+        try:
+            eid = int(existing) if existing is not None and str(existing).lower() != "null" else None
+        except (TypeError, ValueError):
+            eid = None
+        if eid is None:
+            eid = upsert_skill(it["text"], topic_id)
+        skill_id_by_action_index[ai] = eid
+        skill_steps_out.append({
+            "order": ai, "skill_id": eid, "label": it["text"],
+            "prereq_indices": it.get("prerequisite") or [],
+        })
+
+    skill_steps_out.sort(key=lambda x: x["order"])
+
+    return {
+        "normalized": {
+            "content_elements": normalized_content,
+            "skill_steps": skill_steps_out,
+            "skill_id_by_action_index": skill_id_by_action_index,
+        },
+        "usage": u,
+    }
