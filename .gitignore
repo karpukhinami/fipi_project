@@ -7,3 +7,12 @@ venv/
 env/
 .venv/
 migration_export/
+
+# Локальная версия (не для деплоя)
+app.py
+database.py
+analysis_pipeline.py
+sync_analysis_prompt_from_file.py
+import_math_topics.py
+math_topics_v2.xlsx
+start.bat
