@@ -28,6 +28,9 @@ from migration_database import (
     get_curriculum_subsections,
     get_topics_by_subsection,
     get_analysis_prompt,
+    get_analysis_prompt_versions,
+    get_analysis_prompt_version_by_id,
+    save_analysis_prompt_version,
     read_default_analysis_prompt_file,
     read_analysis_json_schema_file,
     read_analysis_field_rules_file,
@@ -1165,11 +1168,11 @@ USER_MESSAGE_ANALYSIS_DESCRIPTION = """Роль user — одно сообщен
 
 
 def build_analysis_prompt_page_payload() -> Dict[str, str]:
-    body, updated = get_analysis_prompt()
+    file_body = load_default_analysis_system_template()
+    versions = get_analysis_prompt_versions()
     return {
-        "body": body or "",
-        "updated_at": updated,
-        "default_system_template": load_default_analysis_system_template(),
+        "file_body": file_body,
+        "versions": versions,
         "placeholders_help": ANALYSIS_PLACEHOLDERS_HELP,
         "user_message_description": USER_MESSAGE_ANALYSIS_DESCRIPTION,
     }
@@ -1234,7 +1237,8 @@ def run_task_analysis(
         return {"ok": False, "error": "Справочник тем пуст. Добавьте темы на странице «Темы»."}
 
     custom_prompt, _ = get_analysis_prompt()
-    template = (custom_prompt or "").strip() or load_default_analysis_system_template()
+    # Активный промпт — всегда версия из файла; DB-запись id=1 больше не влияет на анализ
+    template = load_default_analysis_system_template()
     subsection_flow = _use_subsection_flow(template)
 
     body_text = (task.get("formatted_text") or "").strip() or (task.get("text") or "")

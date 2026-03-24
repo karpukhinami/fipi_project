@@ -186,6 +186,14 @@ def init_db():
             updated_at  TEXT
         )
     ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS analysis_prompt_versions (
+            id         BIGSERIAL PRIMARY KEY,
+            body       TEXT NOT NULL,
+            label      TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    ''')
 
     # Справочник элементов содержания
     conn.execute('''
@@ -420,6 +428,48 @@ def set_analysis_prompt(body):
     conn.commit()
     conn.close()
     return True
+
+
+def get_analysis_prompt_versions():
+    conn = get_conn()
+    rows = conn.execute(
+        'SELECT id, label, created_at FROM analysis_prompt_versions ORDER BY created_at DESC LIMIT 50'
+    ).fetchall()
+    conn.close()
+    return [{'id': r[0], 'label': r[1] or '', 'created_at': r[2]} for r in rows]
+
+
+def get_analysis_prompt_version_by_id(version_id):
+    conn = get_conn()
+    row = conn.execute(
+        'SELECT id, body, label, created_at FROM analysis_prompt_versions WHERE id = %s',
+        (version_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {'id': row[0], 'body': row[1], 'label': row[2] or '', 'created_at': row[3]}
+
+
+def save_analysis_prompt_version(body, label=None):
+    now = datetime.now().isoformat()
+    conn = get_conn()
+    conn.execute(
+        'INSERT INTO analysis_prompt_versions (body, label, created_at) VALUES (%s, %s, %s)',
+        (body or '', label or '', now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def write_default_analysis_prompt_file(text):
+    path = default_analysis_prompt_file_path()
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return True
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
