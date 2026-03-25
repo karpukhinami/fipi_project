@@ -41,11 +41,11 @@
   <div class="card mb-3">
     <div class="card-body pb-1">
       <div class="section-header">OpenRouter — все модели через один ключ</div>
-      <div class="mb-3 px-2">
-        <label class="form-label small fw-semibold mb-1" for="or-key">API-ключ OpenRouter</label>
-        <input type="password" class="form-control form-control-sm font-monospace" id="or-key"
-               placeholder="sk-or-v1-…" autocomplete="off"/>
-        <div class="form-text">Ключ <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a>. Хранится только в браузере.</div>
+      <div class="mb-2 px-2">
+        <div class="text-muted small">
+          <i class="bi bi-shield-lock me-1"></i>
+          Ключ OpenRouter хранится в переменных среды сервера — вводить его здесь не нужно.
+        </div>
       </div>
 
       <!-- OpenRouter models -->
@@ -242,7 +242,6 @@
 (function () {
   const LS_MODEL     = 'ai_model';
   const LS_PROVIDER  = 'ai_provider';
-  const LS_OR_KEY    = 'openrouter_api_key';
   const LS_CLAUDE_KEY = 'claude_api_key';
 
   function getCheckedModelInput() {
@@ -268,13 +267,10 @@
       else r.checked = false;
     });
     if (!found) {
-      // fallback to qwen
       const qwen = document.getElementById('m-qwen');
       if (qwen) qwen.checked = true;
     }
-    const orKey = localStorage.getItem(LS_OR_KEY) || '';
     const claudeKey = localStorage.getItem(LS_CLAUDE_KEY) || '';
-    document.getElementById('or-key').value = orKey;
     document.getElementById('claude-key').value = claudeKey;
     updateClaudeKeyVisibility();
   }
@@ -284,9 +280,8 @@
     if (!inp) return;
     localStorage.setItem(LS_MODEL, inp.value);
     localStorage.setItem(LS_PROVIDER, inp.dataset.provider || 'openrouter');
-    localStorage.setItem(LS_OR_KEY, document.getElementById('or-key').value.trim());
     localStorage.setItem(LS_CLAUDE_KEY, document.getElementById('claude-key').value.trim());
-    // legacy key for backward compat with app.js
+    // legacy compat
     localStorage.setItem('claude_model', inp.value);
     const badge = document.getElementById('saved-badge');
     badge.classList.add('visible');

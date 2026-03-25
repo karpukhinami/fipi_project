@@ -521,11 +521,9 @@ def api_tasks_analyze():
         body = request.get_json() or {}
         provider = (body.get('provider') or 'anthropic').strip()
         if provider == 'openrouter':
-            api_key = (body.get('openrouter_api_key') or '').strip()
+            api_key = os.environ.get('OPENROUTER_API_KEY', '').strip()
             if not api_key:
-                api_key = os.environ.get('OPENROUTER_API_KEY', '').strip()
-            if not api_key:
-                return jsonify({'ok': False, 'error': 'Нужен API-ключ OpenRouter'}), 400
+                return jsonify({'ok': False, 'error': 'Переменная OPENROUTER_API_KEY не задана на сервере'}), 400
         else:
             api_key = (body.get('api_key') or body.get('claude_api_key') or '').strip()
             if not api_key:

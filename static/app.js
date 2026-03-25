@@ -393,7 +393,7 @@ function buildAnalysisMarkupSection(task) {
 let _lastAnalysisSaveData = null;
 
 async function runTaskAnalyze() {
-  const { model, provider, orKey, clKey } = getAiSettings();
+  const { model, provider, clKey } = getAiSettings();
   const task = state.currentTask;
   if (!task) return;
 
@@ -404,11 +404,7 @@ async function runTaskAnalyze() {
     group_position: task.group_position || '',
   };
   if (provider === 'openrouter') {
-    if (!orKey) {
-      showToast('Укажите API-ключ OpenRouter на странице настроек AI', 'warning');
-      return;
-    }
-    payload.openrouter_api_key = orKey;
+    // ключ берётся из переменных среды на сервере
   } else {
     if (!clKey) {
       showToast('Укажите API-ключ Claude на странице настроек AI', 'warning');
@@ -1046,8 +1042,8 @@ function toggleClaudePanel() {
 }
 
 async function sendToClaude() {
-  const { model, provider, orKey, clKey } = getAiSettings();
-  const apiKey = provider === 'openrouter' ? orKey : clKey;
+  const { model, provider, clKey } = getAiSettings();
+  const apiKey = provider === 'anthropic' ? clKey : clKey; // always use clKey for /api/claude
   if (!apiKey) {
     showToast('Укажите API-ключ на странице настроек AI (шестерёнка в шапке)', 'warning');
     return;
@@ -1135,9 +1131,8 @@ async function importFiles(files) {
 function getAiSettings() {
   const model    = localStorage.getItem('ai_model') || 'qwen/qwen3-235b-a22b-2507';
   const provider = localStorage.getItem('ai_provider') || 'openrouter';
-  const orKey    = localStorage.getItem('openrouter_api_key') || '';
   const clKey    = localStorage.getItem('claude_api_key') || '';
-  return { model, provider, orKey, clKey };
+  return { model, provider, clKey };
 }
 
 function loadClaudeSettings() {
