@@ -3,116 +3,303 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Проверка прокси — ФИПИ</title>
+  <title>Настройки AI — ФИПИ</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
   <style>
     body { background: #f0f4f8; min-height: 100vh; }
-    .card { border: none; box-shadow: 0 4px 24px rgba(26, 35, 126, .08); }
-    .page-title { color: #1a237e; font-weight: 600; }
-    #result-box { font-size: .92rem; white-space: pre-wrap; word-break: break-word; }
+    .card { border: none; box-shadow: 0 4px 24px rgba(26,35,126,.08); }
+    .page-title { color: #1a237e; font-weight: 700; }
+    .model-label {
+      display: flex; align-items: flex-start; gap: .55rem;
+      padding: .55rem .75rem; border-radius: .45rem; cursor: pointer;
+      transition: background .12s;
+    }
+    .model-label:hover { background: #e8eef8; }
+    .form-check-input:checked ~ .model-label { background: #dce8ff; }
+    .model-name { font-weight: 600; font-size: .93rem; color: #1a237e; }
+    .model-id { font-size: .78rem; font-family: monospace; color: #5c6bc0; }
+    .model-desc { font-size: .83rem; color: #546e7a; margin-top: .1rem; }
+    .model-price { font-size: .78rem; color: #2e7d32; font-weight: 500; margin-top: .15rem; }
+    .section-header {
+      font-size: .8rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+      color: #78909c; padding: .4rem .75rem .2rem;
+    }
+    .provider-divider { border-color: #c5cae9; margin: .5rem 0; }
+    .saved-badge { display: none; }
+    .saved-badge.visible { display: inline-flex; }
   </style>
 </head>
 <body>
-<div class="container py-4" style="max-width: 640px;">
+<div class="container py-4" style="max-width: 720px;">
+
   <div class="d-flex align-items-center gap-2 mb-4">
     <a href="/" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> К базе</a>
-    <h1 class="page-title h4 mb-0 ms-2">Проверка прокси для Claude</h1>
+    <h1 class="page-title h4 mb-0 ms-2"><i class="bi bi-cpu me-2"></i>Настройки AI-модели</h1>
   </div>
 
   <div class="card mb-3">
-    <div class="card-body">
-      <p class="text-muted small mb-3">
-        Запросы идут с <strong>вашего компьютера</strong> через локальный Flask на
-        <code>api.anthropic.com</code>. Здесь можно проверить, проходит ли трафик через прокси
-        до Anthropic (без расхода токенов — первая кнопка) и сделать короткий реальный вызов с ключом.
-      </p>
+    <div class="card-body pb-1">
+      <div class="section-header">OpenRouter — все модели через один ключ</div>
+      <div class="mb-3 px-2">
+        <label class="form-label small fw-semibold mb-1" for="or-key">API-ключ OpenRouter</label>
+        <input type="password" class="form-control form-control-sm font-monospace" id="or-key"
+               placeholder="sk-or-v1-…" autocomplete="off"/>
+        <div class="form-text">Ключ <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a>. Хранится только в браузере.</div>
+      </div>
 
-      <div class="mb-3">
-        <label class="form-label fw-semibold" for="pt-proxy">HTTPS-прокси (опционально)</label>
-        <input type="text" class="form-control font-monospace" id="pt-proxy"
-               placeholder="http://127.0.0.1:7890 или http://user:pass@host:8080"
-               autocomplete="off"/>
-        <div class="form-text">
-          Оставьте пустым для прямого подключения или если заданы переменные среды
-          <code>ANTHROPIC_HTTPS_PROXY</code> / <code>HTTPS_PROXY</code> на машине, где запущен Flask.
+      <!-- OpenRouter models -->
+      <div id="model-list">
+        <!-- Gemini 2.5 Flash -->
+        <div class="form-check p-0">
+          <input class="form-check-input visually-hidden" type="radio" name="ai-model"
+                 id="m-gemini-flash" value="google/gemini-2.5-flash" data-provider="openrouter"/>
+          <label class="model-label" for="m-gemini-flash">
+            <div>
+              <div class="model-name">Gemini 2.5 Flash</div>
+              <div class="model-id">google/gemini-2.5-flash</div>
+              <div class="model-desc">Лучший баланс скорость/качество среди не-Claude. Хорошо знает русский.</div>
+              <div class="model-price">$0.30 / $2.50 за 1M токенов</div>
+            </div>
+          </label>
         </div>
-      </div>
 
-      <div class="mb-3">
-        <label class="form-label fw-semibold" for="pt-key">API-ключ (только для «Полная проверка»)</label>
-        <input type="password" class="form-control font-monospace" id="pt-key" placeholder="sk-ant-..." autocomplete="off"/>
-        <div class="form-text">На эту страницу ключ не сохраняется — только отправляется в одном запросе.</div>
-      </div>
+        <!-- Gemini 2.5 Flash Lite -->
+        <div class="form-check p-0">
+          <input class="form-check-input visually-hidden" type="radio" name="ai-model"
+                 id="m-gemini-flash-lite" value="google/gemini-2.5-flash-lite" data-provider="openrouter"/>
+          <label class="model-label" for="m-gemini-flash-lite">
+            <div>
+              <div class="model-name">Gemini 2.5 Flash Lite</div>
+              <div class="model-id">google/gemini-2.5-flash-lite</div>
+              <div class="model-desc">Облегчённый Flash. Дешевле и быстрее, для простых задач.</div>
+              <div class="model-price">$0.10 / $0.40 за 1M токенов</div>
+            </div>
+          </label>
+        </div>
 
-      <div class="d-flex flex-wrap gap-2">
-        <button type="button" class="btn btn-primary" id="pt-btn-connectivity">
-          <i class="bi bi-lightning-charge me-1"></i>Проверка связи (без ключа)
-        </button>
-        <button type="button" class="btn btn-outline-primary" id="pt-btn-full">
-          <i class="bi bi-robot me-1"></i>Полная проверка с ключом
-        </button>
+        <!-- DeepSeek -->
+        <div class="form-check p-0">
+          <input class="form-check-input visually-hidden" type="radio" name="ai-model"
+                 id="m-deepseek" value="deepseek/deepseek-chat-v3.1" data-provider="openrouter"/>
+          <label class="model-label" for="m-deepseek">
+            <div>
+              <div class="model-name">DeepSeek v3.1</div>
+              <div class="model-id">deepseek/deepseek-chat-v3.1</div>
+              <div class="model-desc">Китайская модель. Отличный русский, хорошо понимает математику.</div>
+              <div class="model-price">$0.27 / $1.10 за 1M токенов</div>
+            </div>
+          </label>
+        </div>
+
+        <!-- Qwen 3 235B — default -->
+        <div class="form-check p-0">
+          <input class="form-check-input visually-hidden" type="radio" name="ai-model"
+                 id="m-qwen" value="qwen/qwen3-235b-a22b-2507" data-provider="openrouter" checked/>
+          <label class="model-label" for="m-qwen">
+            <div>
+              <div class="model-name">Qwen 3 235B <span class="badge bg-success ms-1" style="font-size:.7rem">рекомендуется</span></div>
+              <div class="model-id">qwen/qwen3-235b-a22b-2507</div>
+              <div class="model-desc">235 млрд параметров, почти бесплатно. Отличный русский, структурированные задачи.</div>
+              <div class="model-price">$0.14 / $0.39 за 1M токенов</div>
+            </div>
+          </label>
+        </div>
+
+        <!-- GPT-4o mini -->
+        <div class="form-check p-0">
+          <input class="form-check-input visually-hidden" type="radio" name="ai-model"
+                 id="m-gpt4omini" value="openai/gpt-4o-mini" data-provider="openrouter"/>
+          <label class="model-label" for="m-gpt4omini">
+            <div>
+              <div class="model-name">GPT-4o Mini</div>
+              <div class="model-id">openai/gpt-4o-mini</div>
+              <div class="model-desc">Надёжный OpenAI. Стабилен, хорошо следует JSON-инструкциям.</div>
+              <div class="model-price">$0.15 / $0.60 за 1M токенов</div>
+            </div>
+          </label>
+        </div>
+
+        <!-- GPT-4.1 Nano -->
+        <div class="form-check p-0">
+          <input class="form-check-input visually-hidden" type="radio" name="ai-model"
+                 id="m-gpt41nano" value="openai/gpt-4.1-nano" data-provider="openrouter"/>
+          <label class="model-label" for="m-gpt41nano">
+            <div>
+              <div class="model-name">GPT-4.1 Nano</div>
+              <div class="model-id">openai/gpt-4.1-nano</div>
+              <div class="model-desc">Новее и дешевле Mini, оптимизирован для instruction-following.</div>
+              <div class="model-price">$0.10 / $0.40 за 1M токенов</div>
+            </div>
+          </label>
+        </div>
+
+        <!-- Claude Haiku via OR -->
+        <div class="form-check p-0">
+          <input class="form-check-input visually-hidden" type="radio" name="ai-model"
+                 id="m-haiku-or" value="anthropic/claude-haiku-4.5" data-provider="openrouter"/>
+          <label class="model-label" for="m-haiku-or">
+            <div>
+              <div class="model-name">Claude Haiku 4.5 (через OR)</div>
+              <div class="model-id">anthropic/claude-haiku-4.5</div>
+              <div class="model-desc">Малый Claude. Хорошо следует инструкциям, дешевле Sonnet.</div>
+              <div class="model-price">$1.00 / $5.00 за 1M токенов</div>
+            </div>
+          </label>
+        </div>
+
+        <!-- Mistral Small -->
+        <div class="form-check p-0">
+          <input class="form-check-input visually-hidden" type="radio" name="ai-model"
+                 id="m-mistral" value="mistralai/mistral-small-3.1-24b-instruct" data-provider="openrouter"/>
+          <label class="model-label" for="m-mistral">
+            <div>
+              <div class="model-name">Mistral Small 3.1</div>
+              <div class="model-id">mistralai/mistral-small-3.1-24b-instruct</div>
+              <div class="model-desc">Европейская, самая дешёвая. Для больших объёмов.</div>
+              <div class="model-price">$0.05 / $0.15 за 1M токенов</div>
+            </div>
+          </label>
+        </div>
+
+        <!-- Phi-4 -->
+        <div class="form-check p-0">
+          <input class="form-check-input visually-hidden" type="radio" name="ai-model"
+                 id="m-phi4" value="microsoft/phi-4" data-provider="openrouter"/>
+          <label class="model-label" for="m-phi4">
+            <div>
+              <div class="model-name">Phi-4</div>
+              <div class="model-id">microsoft/phi-4</div>
+              <div class="model-desc">Компактная Microsoft. Дёшево и быстро.</div>
+              <div class="model-price">$0.07 / $0.14 за 1M токенов</div>
+            </div>
+          </label>
+        </div>
+
+        <!-- Llama 3.3 70B -->
+        <div class="form-check p-0">
+          <input class="form-check-input visually-hidden" type="radio" name="ai-model"
+                 id="m-llama" value="meta-llama/llama-3.3-70b-instruct" data-provider="openrouter"/>
+          <label class="model-label" for="m-llama">
+            <div>
+              <div class="model-name">Llama 3.3 70B</div>
+              <div class="model-id">meta-llama/llama-3.3-70b-instruct</div>
+              <div class="model-desc">Открытая Meta 70B. Хороший баланс размер/цена.</div>
+              <div class="model-price">$0.10 / $0.25 за 1M токенов</div>
+            </div>
+          </label>
+        </div>
+
+        <hr class="provider-divider"/>
+        <div class="section-header">Anthropic напрямую — свой ключ</div>
+
+        <!-- Claude Sonnet direct -->
+        <div class="form-check p-0">
+          <input class="form-check-input visually-hidden" type="radio" name="ai-model"
+                 id="m-claude-direct" value="claude-sonnet-4-20250514" data-provider="anthropic"/>
+          <label class="model-label" for="m-claude-direct">
+            <div>
+              <div class="model-name">Клод, просто Клод <span class="badge bg-secondary ms-1" style="font-size:.7rem">claude-sonnet-4</span></div>
+              <div class="model-id">claude-sonnet-4-20250514 · api.anthropic.com</div>
+              <div class="model-desc">Самый надёжный для русского и сложных инструкций.</div>
+              <div class="model-price">$3.00 / $15.00 за 1M токенов</div>
+            </div>
+          </label>
+        </div>
+      </div><!-- /model-list -->
+
+      <!-- Claude API key (visible only when claude-direct is selected) -->
+      <div id="claude-key-section" class="px-2 mt-2 mb-3" style="display:none">
+        <label class="form-label small fw-semibold mb-1" for="claude-key">API-ключ Anthropic (для Клода)</label>
+        <input type="password" class="form-control form-control-sm font-monospace" id="claude-key"
+               placeholder="sk-ant-…" autocomplete="off"/>
+        <div class="form-text">Ключ <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a>. Хранится только в браузере.</div>
       </div>
+    </div><!-- /card-body -->
+
+    <div class="card-footer d-flex align-items-center gap-3">
+      <button class="btn btn-primary" id="btn-save-ai-settings">
+        <i class="bi bi-floppy me-1"></i>Сохранить настройки
+      </button>
+      <span class="saved-badge align-items-center gap-1 text-success small" id="saved-badge">
+        <i class="bi bi-check-circle-fill"></i> Сохранено
+      </span>
+    </div>
+  </div><!-- /card -->
+
+  <div class="card text-muted small">
+    <div class="card-body py-2 px-3">
+      <i class="bi bi-info-circle me-1"></i>
+      Выбранная модель и ключи хранятся только в <strong>localStorage</strong> вашего браузера.
+      На сервер ключ уходит только в момент запроса анализа — и только для этого запроса.
     </div>
   </div>
 
-  <div class="card" id="pt-result-card" style="display:none">
-    <div class="card-header d-flex align-items-center gap-2">
-      <i class="bi bi-terminal"></i> Результат
-    </div>
-    <div class="card-body">
-      <div id="result-box" class="mb-0"></div>
-    </div>
-  </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 (function () {
-  const $ = (id) => document.getElementById(id);
-  const resultCard = $('pt-result-card');
-  const resultBox = $('result-box');
+  const LS_MODEL     = 'ai_model';
+  const LS_PROVIDER  = 'ai_provider';
+  const LS_OR_KEY    = 'openrouter_api_key';
+  const LS_CLAUDE_KEY = 'claude_api_key';
 
-  function showResult(obj, ok) {
-    resultCard.style.display = '';
-    resultBox.className = 'mb-0 ' + (ok ? 'text-success' : 'text-danger');
-    resultBox.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+  function getCheckedModelInput() {
+    return document.querySelector('input[name="ai-model"]:checked');
   }
 
-  async function run(mode) {
-    const proxy_url = ($('pt-proxy').value || '').trim();
-    const api_key = ($('pt-key').value || '').trim();
-    if (mode === 'full' && !api_key) {
-      showResult('Укажите API-ключ для полной проверки.', false);
-      resultCard.style.display = '';
-      return;
-    }
-    resultCard.style.display = '';
-    resultBox.className = 'mb-0 text-secondary';
-    resultBox.textContent = 'Выполняется запрос…';
-
-    try {
-      const body = { mode, proxy_url };
-      if (mode === 'full') body.api_key = api_key;
-      const res = await fetch('/api/proxy-test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json().catch(() => ({ error: 'Некорректный JSON ответа' }));
-      const success = data.ok === true;
-      showResult(data, success);
-    } catch (e) {
-      showResult({ error: String(e.message || e) }, false);
+  function updateClaudeKeyVisibility() {
+    const inp = getCheckedModelInput();
+    const section = document.getElementById('claude-key-section');
+    if (inp && inp.dataset.provider === 'anthropic') {
+      section.style.display = '';
+    } else {
+      section.style.display = 'none';
     }
   }
 
-  $('pt-btn-connectivity').addEventListener('click', () => run('connectivity'));
-  $('pt-btn-full').addEventListener('click', () => run('full'));
+  function loadSettings() {
+    const savedModel = localStorage.getItem(LS_MODEL) || 'qwen/qwen3-235b-a22b-2507';
+    const radios = document.querySelectorAll('input[name="ai-model"]');
+    let found = false;
+    radios.forEach(r => {
+      if (r.value === savedModel) { r.checked = true; found = true; }
+      else r.checked = false;
+    });
+    if (!found) {
+      // fallback to qwen
+      const qwen = document.getElementById('m-qwen');
+      if (qwen) qwen.checked = true;
+    }
+    const orKey = localStorage.getItem(LS_OR_KEY) || '';
+    const claudeKey = localStorage.getItem(LS_CLAUDE_KEY) || '';
+    document.getElementById('or-key').value = orKey;
+    document.getElementById('claude-key').value = claudeKey;
+    updateClaudeKeyVisibility();
+  }
 
-  // Подставить прокси из localStorage базы, если есть
-  const saved = localStorage.getItem('claude_proxy_url');
-  if (saved && $('pt-proxy')) $('pt-proxy').value = saved;
+  function saveSettings() {
+    const inp = getCheckedModelInput();
+    if (!inp) return;
+    localStorage.setItem(LS_MODEL, inp.value);
+    localStorage.setItem(LS_PROVIDER, inp.dataset.provider || 'openrouter');
+    localStorage.setItem(LS_OR_KEY, document.getElementById('or-key').value.trim());
+    localStorage.setItem(LS_CLAUDE_KEY, document.getElementById('claude-key').value.trim());
+    // legacy key for backward compat with app.js
+    localStorage.setItem('claude_model', inp.value);
+    const badge = document.getElementById('saved-badge');
+    badge.classList.add('visible');
+    setTimeout(() => badge.classList.remove('visible'), 2500);
+  }
+
+  document.querySelectorAll('input[name="ai-model"]').forEach(r => {
+    r.addEventListener('change', updateClaudeKeyVisibility);
+  });
+
+  document.getElementById('btn-save-ai-settings').addEventListener('click', saveSettings);
+
+  loadSettings();
 })();
 </script>
 </body>

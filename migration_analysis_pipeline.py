@@ -44,9 +44,37 @@ from migration_database import (
     save_task_analysis,
 )
 
-USD_PER_MTOK_INPUT = 3.0
+USD_PER_MTOK_INPUT = 3.0   # Claude Sonnet direct
 USD_PER_MTOK_OUTPUT = 15.0
-RUB_PER_USD = 80.0
+RUB_PER_USD = 90.0
+
+# Pricing for OpenRouter models: (input $/M, output $/M)
+OPENROUTER_MODEL_PRICING: Dict[str, Tuple[float, float]] = {
+    "google/gemini-2.5-flash":                     (0.30,  2.50),
+    "google/gemini-2.5-flash-lite":                (0.10,  0.40),
+    "anthropic/claude-haiku-4.5":                  (1.00,  5.00),
+    "deepseek/deepseek-chat-v3.1":                 (0.27,  1.10),
+    "qwen/qwen3-235b-a22b-2507":                   (0.14,  0.39),
+    "openai/gpt-4o-mini":                          (0.15,  0.60),
+    "openai/gpt-4.1-nano":                         (0.10,  0.40),
+    "mistralai/mistral-small-3.1-24b-instruct":    (0.05,  0.15),
+    "microsoft/phi-4":                             (0.07,  0.14),
+    "meta-llama/llama-3.3-70b-instruct":           (0.10,  0.25),
+}
+# Direct Anthropic models
+ANTHROPIC_MODEL_PRICING: Dict[str, Tuple[float, float]] = {
+    "claude-sonnet-4-20250514": (3.00, 15.00),
+    "claude-sonnet-4-0":        (3.00, 15.00),
+    "claude-haiku-4-5":         (0.80,  4.00),
+    "claude-opus-4-5":         (15.00, 75.00),
+}
+
+
+def model_pricing(model: str, provider: str = "anthropic") -> Tuple[float, float]:
+    """Returns (input_price, output_price) in USD per 1M tokens."""
+    if provider == "openrouter":
+        return OPENROUTER_MODEL_PRICING.get(model, (1.0, 5.0))
+    return ANTHROPIC_MODEL_PRICING.get(model, (USD_PER_MTOK_INPUT, USD_PER_MTOK_OUTPUT))
 
 
 def _proxies(proxy_url: Optional[str]) -> Optional[dict]:
@@ -569,6 +597,7 @@ def repair_analysis_json_via_llm(
     raw_model_text: str,
     reason: str,
     partial: Optional[dict] = None,
+    provider: str = "anthropic",
 ) -> Tuple[str, Dict[str, int]]:
     system = "\n\n".join([
         JSON_OUTPUT_STRICT_RU,
@@ -582,9 +611,9 @@ def repair_analysis_json_via_llm(
     else:
         parts.append("Сырой ответ модели:\n" + (raw_model_text or "")[:12000])
     user = "\n".join(parts)
-    return anthropic_messages(api_key, model,
+    return call_ai(api_key, model,
         [{"role": "user", "content": [{"type": "text", "text": user}]}],
-        system, max_tokens=8192, proxy_url=proxy_url)
+        system, max_tokens=8192, proxy_url=proxy_url, provider=provider)
 
 
 def normalize_merge_mapping(mapping: dict) -> Tuple[dict, List[str]]:
@@ -652,6 +681,7 @@ def repair_merge_mapping_via_llm(
     failed_text: str,
     reason: str,
     payload_user: str,
+    provider: str = "anthropic",
 ) -> Tuple[str, Dict[str, int]]:
     system = "\n\n".join([
         JSON_OUTPUT_STRICT_RU,
@@ -660,9 +690,9 @@ def repair_merge_mapping_via_llm(
         "Верни только один JSON-объект, без текста вокруг.",
     ])
     user = f"{reason}\n\nЗапрос был:\n{payload_user[:8000]}\n\nНекорректный ответ:\n{failed_text[:6000]}"
-    return anthropic_messages(api_key, model,
+    return call_ai(api_key, model,
         [{"role": "user", "content": [{"type": "text", "text": user}]}],
-        system, max_tokens=4096, proxy_url=proxy_url)
+        system, max_tokens=4096, proxy_url=proxy_url, provider=provider)
 
 
 def normalize_merge_with_topic_mapping(mapping: dict) -> Tuple[dict, List[str]]:
@@ -722,6 +752,7 @@ def merge_catalogs_with_topic_llm(
     proxy_url: Optional[str],
     task_body_text: str = "",
     task_images: Optional[dict] = None,
+    provider: str = "anthropic",
 ) -> dict:
     """Second pass: picks topic_id from subsection topics AND matches skills/elements."""
     from migration_database import get_conn
@@ -794,9 +825,9 @@ def merge_catalogs_with_topic_llm(
         "Ответ — только один JSON-объект.",
     ])
 
-    text, u = anthropic_messages(api_key, model,
+    text, u = call_ai(api_key, model,
         [{"role": "user", "content": user_parts}],
-        sys, max_tokens=4096, proxy_url=proxy_url)
+        sys, max_tokens=4096, proxy_url=proxy_url, provider=provider)
 
     mapping: dict = {}
     try:
@@ -804,7 +835,8 @@ def merge_catalogs_with_topic_llm(
     except Exception as parse_ex:
         try:
             text2, u2 = repair_merge_mapping_via_llm(api_key, model, proxy_url,
-                failed_text=text, reason=f"парсинг merge+topic JSON: {parse_ex}", payload_user=user_text)
+                failed_text=text, reason=f"парсинг merge+topic JSON: {parse_ex}", payload_user=user_text,
+                provider=provider)
             u["input_tokens"] += u2["input_tokens"]
             u["output_tokens"] += u2["output_tokens"]
             mapping = extract_json_object(text2)
@@ -835,13 +867,10 @@ def merge_catalogs_with_topic_llm(
             eid = int(existing) if existing is not None and str(existing).lower() != "null" else None
         except (TypeError, ValueError):
             eid = None
-        if eid is None:
-            eid = upsert_content_element(it["text"], topic_id_from_merge)
-        normalized_content.append({"id": eid, "label": it["text"],
+        normalized_content.append({"existing_id": eid, "label": it["text"],
                                     "importance": it.get("importance"), "stage": it.get("stage")})
 
     skill_steps_out: List[dict] = []
-    skill_id_by_action_index: Dict[int, int] = {}
     for it in skill_items:
         ai = it["action_index"]
         existing = sr.get(ai)
@@ -849,11 +878,8 @@ def merge_catalogs_with_topic_llm(
             eid = int(existing) if existing is not None and str(existing).lower() != "null" else None
         except (TypeError, ValueError):
             eid = None
-        if eid is None:
-            eid = upsert_skill(it["text"], topic_id_from_merge)
-        skill_id_by_action_index[ai] = eid
         skill_steps_out.append({
-            "order": ai, "skill_id": eid, "label": it["text"],
+            "order": ai, "existing_skill_id": eid, "label": it["text"],
             "prereq_indices": it.get("prerequisite") or [],
         })
     skill_steps_out.sort(key=lambda x: x["order"])
@@ -863,7 +889,6 @@ def merge_catalogs_with_topic_llm(
         "normalized": {
             "content_elements": normalized_content,
             "skill_steps": skill_steps_out,
-            "skill_id_by_action_index": skill_id_by_action_index,
         },
         "usage": u,
     }
@@ -1013,6 +1038,79 @@ def build_message_content(text: str, images: dict, max_images: int = 10) -> List
     return blocks
 
 
+def openrouter_messages(
+    api_key: str,
+    model: str,
+    messages: List[dict],
+    system: str,
+    max_tokens: int = 8192,
+) -> Tuple[str, Dict[str, int]]:
+    """Call OpenRouter OpenAI-compatible API. Converts Anthropic content format to OpenAI format."""
+    full_messages: List[dict] = [{"role": "system", "content": system}]
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str):
+            full_messages.append({"role": msg["role"], "content": content})
+        elif isinstance(content, list):
+            converted: List[dict] = []
+            for block in content:
+                btype = block.get("type")
+                if btype == "text":
+                    converted.append({"type": "text", "text": block.get("text") or ""})
+                elif btype == "image":
+                    src = block.get("source") or {}
+                    if src.get("type") == "base64":
+                        data_url = f"data:{src['media_type']};base64,{src['data']}"
+                        converted.append({"type": "image_url", "image_url": {"url": data_url}})
+            full_messages.append({"role": msg["role"], "content": converted or [{"type": "text", "text": ""}]})
+        else:
+            full_messages.append({"role": msg["role"], "content": ""})
+
+    resp = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://fipi-app.onrender.com",
+        },
+        json={"model": model, "max_tokens": max_tokens, "messages": full_messages},
+        timeout=300,
+    )
+    if resp.status_code != 200:
+        try:
+            err = resp.json()
+        except Exception:
+            err = {"raw": resp.text[:2000]}
+        raise RuntimeError(f"OpenRouter HTTP {resp.status_code}: {json.dumps(err, ensure_ascii=False)}")
+    data = resp.json()
+    text = ""
+    try:
+        text = data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        pass
+    usage = data.get("usage") or {}
+    u = {
+        "input_tokens": int(usage.get("prompt_tokens") or 0),
+        "output_tokens": int(usage.get("completion_tokens") or 0),
+    }
+    return text, u
+
+
+def call_ai(
+    api_key: str,
+    model: str,
+    messages: List[dict],
+    system: str,
+    max_tokens: int = 8192,
+    proxy_url: Optional[str] = None,
+    provider: str = "anthropic",
+) -> Tuple[str, Dict[str, int]]:
+    """Dispatch to Anthropic or OpenRouter depending on provider."""
+    if provider == "openrouter":
+        return openrouter_messages(api_key, model, messages, system, max_tokens)
+    return anthropic_messages(api_key, model, messages, system, max_tokens, proxy_url)
+
+
 def anthropic_messages(
     api_key: str,
     model: str,
@@ -1053,12 +1151,13 @@ def anthropic_messages(
     return text, u
 
 
-def usage_cost_usd(inp: int, out: int) -> float:
-    return (inp / 1_000_000.0) * USD_PER_MTOK_INPUT + (out / 1_000_000.0) * USD_PER_MTOK_OUTPUT
+def usage_cost_usd(inp: int, out: int, model: str = "", provider: str = "anthropic") -> float:
+    in_p, out_p = model_pricing(model, provider)
+    return (inp / 1_000_000.0) * in_p + (out / 1_000_000.0) * out_p
 
 
-def usage_cost_rub(inp: int, out: int) -> float:
-    return usage_cost_usd(inp, out) * RUB_PER_USD
+def usage_cost_rub(inp: int, out: int, model: str = "", provider: str = "anthropic") -> float:
+    return usage_cost_usd(inp, out, model, provider) * RUB_PER_USD
 
 
 def _topics_payload_for_prompt(topics: List[dict]) -> List[dict]:
@@ -1225,9 +1324,11 @@ def _is_math_subject(subject: str) -> bool:
 def run_task_analysis(
     task: dict,
     api_key: str,
-    model: str = "claude-sonnet-4-0",
+    model: str = "claude-sonnet-4-20250514",
     proxy_url: Optional[str] = None,
+    provider: str = "anthropic",
 ) -> dict:
+    """Run AI analysis without saving to DB. Returns result + _save_data for later commit."""
     subject = (task.get("subject") or "").strip()
     if not _is_math_subject(subject):
         return {"ok": False, "error": "Пока анализ только для математики."}
@@ -1237,7 +1338,6 @@ def run_task_analysis(
         return {"ok": False, "error": "Справочник тем пуст. Добавьте темы на странице «Темы»."}
 
     custom_prompt, _ = get_analysis_prompt()
-    # Активный промпт — всегда версия из файла; DB-запись id=1 больше не влияет на анализ
     template = load_default_analysis_system_template()
     subsection_flow = _use_subsection_flow(template)
 
@@ -1254,6 +1354,8 @@ def run_task_analysis(
         "subject_import": task.get("subject"),
     }
 
+    in_p, out_p = model_pricing(model, provider)
+
     system = build_analysis_system_prompt(custom_prompt, topics, kes, meta)
     user_parts = []
     user_parts.extend(build_message_content(body_text, images))
@@ -1267,7 +1369,8 @@ def run_task_analysis(
 
     usage_total = {"input_tokens": 0, "output_tokens": 0}
     try:
-        text1, u1 = anthropic_messages(api_key, model, messages, system, max_tokens=8192, proxy_url=proxy_url)
+        text1, u1 = call_ai(api_key, model, messages, system, max_tokens=8192,
+                            proxy_url=proxy_url, provider=provider)
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -1284,10 +1387,13 @@ def run_task_analysis(
 
     first_pass_mode = "subsection_flow" if subsection_flow else "topic_flow"
 
+    def _cost_rub_now():
+        return usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"], model, provider)
+
     if raw is None:
         try:
             t_fix, u_fix = repair_analysis_json_via_llm(api_key, model, proxy_url,
-                raw_model_text=text1, reason=f"парсинг: {parse_err}", partial=None)
+                raw_model_text=text1, reason=f"парсинг: {parse_err}", partial=None, provider=provider)
             usage_total["input_tokens"] += u_fix["input_tokens"]
             usage_total["output_tokens"] += u_fix["output_tokens"]
             raw = extract_json_object(t_fix)
@@ -1298,7 +1404,7 @@ def run_task_analysis(
                 "error": f"Не удалось разобрать JSON: {parse_err}; исправление: {e2}",
                 "raw_text": text1[:4000],
                 "usage": usage_total,
-                "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+                "cost_rub": _cost_rub_now(),
             }
 
     raw, fixes = normalize_analysis_raw(raw)
@@ -1307,7 +1413,8 @@ def run_task_analysis(
     if val_errs:
         try:
             t_fix2, u_fix2 = repair_analysis_json_via_llm(api_key, model, proxy_url,
-                raw_model_text=text1, reason="валидация: " + "; ".join(val_errs), partial=raw)
+                raw_model_text=text1, reason="валидация: " + "; ".join(val_errs), partial=raw,
+                provider=provider)
             usage_total["input_tokens"] += u_fix2["input_tokens"]
             usage_total["output_tokens"] += u_fix2["output_tokens"]
             raw = extract_json_object(t_fix2)
@@ -1325,7 +1432,7 @@ def run_task_analysis(
             "mechanical_fixes": mech_notes,
             "raw_text": text1[:4000],
             "usage": usage_total,
-            "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+            "cost_rub": _cost_rub_now(),
         }
 
     # ── Second pass: get topic_id (subsection flow) or use it from first pass (legacy) ──
@@ -1338,13 +1445,14 @@ def run_task_analysis(
                 "ok": False,
                 "error": f"Подраздел «{subsection_choice}» не найден в справочнике тем",
                 "usage": usage_total,
-                "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+                "cost_rub": _cost_rub_now(),
             }
 
         merge_usage = merge_catalogs_with_topic_llm(
             raw, subsection_choice, section_choice, subsection_topics,
             api_key, model, proxy_url,
             task_body_text=body_text, task_images=images,
+            provider=provider,
         )
         topic_id = merge_usage.get("topic_id")
         if not topic_id:
@@ -1352,7 +1460,7 @@ def run_task_analysis(
                 "ok": False,
                 "error": "Второй проход не вернул topic_id",
                 "usage": usage_total,
-                "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+                "cost_rub": _cost_rub_now(),
             }
     else:
         topic_id = raw.get("topic_id")
@@ -1363,9 +1471,9 @@ def run_task_analysis(
                 "ok": False,
                 "error": f"Некорректный topic_id: {topic_id!r}",
                 "usage": usage_total,
-                "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+                "cost_rub": _cost_rub_now(),
             }
-        merge_usage = merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url)
+        merge_usage = merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url, provider=provider)
 
     mu = merge_usage.get("usage") or {}
     usage_total["input_tokens"] += int(mu.get("input_tokens") or 0)
@@ -1377,27 +1485,10 @@ def run_task_analysis(
             "ok": False,
             "error": f"topic_id {topic_id} не найден в справочнике",
             "usage": usage_total,
-            "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
+            "cost_rub": _cost_rub_now(),
         }
 
     normalized = merge_usage["normalized"]
-    task_rowid = get_task_rowid(task.get("id"), task.get("group_id"), task.get("group_position"))
-    if not task_rowid:
-        return {"ok": False, "error": "Не найден rowid задания"}
-
-    clear_task_analysis_links(task_rowid)
-    for el in normalized.get("content_elements") or []:
-        add_task_content_element(task_rowid, el["id"], el.get("importance"), el.get("stage"))
-
-    idx_map = normalized.get("skill_id_by_action_index") or {}
-    for step in normalized.get("skill_steps") or []:
-        add_task_skill_step(task_rowid, step["order"], step["skill_id"], step.get("prereq_indices"))
-
-    for step in normalized.get("skill_steps") or []:
-        sid = step["skill_id"]
-        for pi in step.get("prereq_indices") or []:
-            if isinstance(pi, int) and pi in idx_map:
-                increment_prerequisite(idx_map[pi], sid, 1)
 
     new_solution = raw.get("solution_steps")
     if isinstance(new_solution, list):
@@ -1408,13 +1499,17 @@ def run_task_analysis(
     if fa:
         solution_text = (solution_text + "\n\nОтвет: " + str(fa)).strip()
 
+    cost_usd = usage_cost_usd(usage_total["input_tokens"], usage_total["output_tokens"], model, provider)
+    cost_rub = cost_usd * RUB_PER_USD
+    pricing_label = f"{model} (${in_p}/M in, ${out_p}/M out, курс {RUB_PER_USD} ₽/$)"
+
     usage_json = {
         "primary": u1,
         "merge": merge_usage.get("usage") or {"input_tokens": 0, "output_tokens": 0},
         "totals": usage_total,
-        "cost_usd": usage_cost_usd(usage_total["input_tokens"], usage_total["output_tokens"]),
-        "cost_rub": usage_cost_rub(usage_total["input_tokens"], usage_total["output_tokens"]),
-        "pricing_note": f"оценка по ${USD_PER_MTOK_INPUT}/M in, ${USD_PER_MTOK_OUTPUT}/M out, курс {RUB_PER_USD} ₽/$",
+        "cost_usd": cost_usd,
+        "cost_rub": cost_rub,
+        "pricing_note": pricing_label,
     }
     if mech_notes:
         usage_json["json_normalization_notes"] = mech_notes
@@ -1423,7 +1518,7 @@ def run_task_analysis(
         "topic_id": topic_id,
         "curriculum": {
             "section": topic_row["section"],
-            "subsection": topic_row.get("subsection"),
+            "subsection": topic_row.get("subsection") or "",
             "topic": topic_row["topic"],
             "grade_class": topic_row["grade_class"],
         },
@@ -1437,29 +1532,95 @@ def run_task_analysis(
 
     fallback_json = build_analysis_fallback_snapshot(topic_id, topic_row, raw, normalized, result_payload)
 
-    save_task_analysis(
-        task.get("id"), task.get("group_id"), task.get("group_position"),
-        topic_id, topic_row["section"], topic_row.get("subsection") or "",
-        topic_row["topic"], str(topic_row["grade_class"]),
-        solution_text or None,
-        json.dumps(raw, ensure_ascii=False),
-        json.dumps(result_payload, ensure_ascii=False),
-        json.dumps(usage_json, ensure_ascii=False),
-        fallback_json,
-        suggested_answer=fa or None,
-    )
+    # _save_data contains everything needed for commit_task_analysis_to_db
+    save_data = {
+        "task_id": task.get("id"),
+        "group_id": task.get("group_id"),
+        "group_position": task.get("group_position"),
+        "topic_id": topic_id,
+        "section": topic_row["section"],
+        "subsection": topic_row.get("subsection") or "",
+        "topic": topic_row["topic"],
+        "grade_class": str(topic_row.get("grade_class") or ""),
+        "solution_text": solution_text or None,
+        "final_answer": fa or None,
+        "raw_json": json.dumps(raw, ensure_ascii=False),
+        "result_json": json.dumps(result_payload, ensure_ascii=False),
+        "usage_json": json.dumps(usage_json, ensure_ascii=False),
+        "fallback_json": fallback_json,
+        "normalized_content_elements": normalized.get("content_elements") or [],
+        "normalized_skill_steps": normalized.get("skill_steps") or [],
+    }
 
     return {
         "ok": True,
         "result": result_payload,
         "usage": usage_total,
-        "cost_rub": usage_json["cost_rub"],
-        "cost_usd": usage_json["cost_usd"],
+        "cost_rub": cost_rub,
+        "cost_usd": cost_usd,
         "usage_detail": usage_json,
+        "_save_data": save_data,
     }
 
 
-def merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url):
+def commit_task_analysis_to_db(save_data: dict) -> dict:
+    """Persist analysis results to DB. Call after user confirms via 'Сохранить в базу'."""
+    task_id = save_data.get("task_id")
+    group_id = save_data.get("group_id")
+    group_position = save_data.get("group_position")
+    topic_id = save_data.get("topic_id")
+
+    task_rowid = get_task_rowid(task_id, group_id, group_position)
+    if not task_rowid:
+        return {"ok": False, "error": "Не найден rowid задания"}
+
+    clear_task_analysis_links(task_rowid)
+
+    # Upsert content elements and create links
+    for el in save_data.get("normalized_content_elements") or []:
+        eid = el.get("existing_id")
+        if eid is None:
+            eid = upsert_content_element(el["label"], topic_id)
+        if eid:
+            add_task_content_element(task_rowid, eid, el.get("importance"), el.get("stage"))
+
+    # Upsert skills and create step links
+    idx_map: Dict[int, int] = {}
+    for step in save_data.get("normalized_skill_steps") or []:
+        sid = step.get("existing_skill_id")
+        if sid is None:
+            sid = upsert_skill(step["label"], topic_id)
+        if sid:
+            idx_map[step["order"]] = sid
+            add_task_skill_step(task_rowid, step["order"], sid, step.get("prereq_indices"))
+
+    # Increment prerequisite counters
+    for step in save_data.get("normalized_skill_steps") or []:
+        sid = idx_map.get(step["order"])
+        if not sid:
+            continue
+        for pi in step.get("prereq_indices") or []:
+            if isinstance(pi, int) and pi in idx_map:
+                increment_prerequisite(idx_map[pi], sid, 1)
+
+    save_task_analysis(
+        task_id, group_id, group_position,
+        topic_id,
+        save_data.get("section"),
+        save_data.get("subsection"),
+        save_data.get("topic"),
+        save_data.get("grade_class"),
+        save_data.get("solution_text"),
+        save_data.get("raw_json"),
+        save_data.get("result_json"),
+        save_data.get("usage_json"),
+        save_data.get("fallback_json"),
+        suggested_answer=save_data.get("final_answer"),
+    )
+    return {"ok": True}
+
+
+def merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url, provider="anthropic"):
     from migration_database import get_conn
 
     conn = get_conn()
@@ -1520,9 +1681,9 @@ def merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url):
         "Ответ — только один JSON-объект.",
     ])
 
-    text, u = anthropic_messages(api_key, model,
+    text, u = call_ai(api_key, model,
         [{"role": "user", "content": [{"type": "text", "text": user}]}],
-        sys, max_tokens=4096, proxy_url=proxy_url)
+        sys, max_tokens=4096, proxy_url=proxy_url, provider=provider)
 
     mapping: dict = {}
     try:
@@ -1530,7 +1691,8 @@ def merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url):
     except Exception as parse_ex:
         try:
             text2, u2 = repair_merge_mapping_via_llm(api_key, model, proxy_url,
-                failed_text=text, reason=f"парсинг merge JSON: {parse_ex}", payload_user=user)
+                failed_text=text, reason=f"парсинг merge JSON: {parse_ex}", payload_user=user,
+                provider=provider)
             u["input_tokens"] += u2["input_tokens"]
             u["output_tokens"] += u2["output_tokens"]
             mapping = extract_json_object(text2)
@@ -1557,13 +1719,10 @@ def merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url):
             eid = int(existing) if existing is not None and str(existing).lower() != "null" else None
         except (TypeError, ValueError):
             eid = None
-        if eid is None:
-            eid = upsert_content_element(it["text"], topic_id)
-        normalized_content.append({"id": eid, "label": it["text"],
+        normalized_content.append({"existing_id": eid, "label": it["text"],
                                     "importance": it.get("importance"), "stage": it.get("stage")})
 
     skill_steps_out: List[dict] = []
-    skill_id_by_action_index: Dict[int, int] = {}
 
     for it in skill_items:
         ai = it["action_index"]
@@ -1572,11 +1731,8 @@ def merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url):
             eid = int(existing) if existing is not None and str(existing).lower() != "null" else None
         except (TypeError, ValueError):
             eid = None
-        if eid is None:
-            eid = upsert_skill(it["text"], topic_id)
-        skill_id_by_action_index[ai] = eid
         skill_steps_out.append({
-            "order": ai, "skill_id": eid, "label": it["text"],
+            "order": ai, "existing_skill_id": eid, "label": it["text"],
             "prereq_indices": it.get("prerequisite") or [],
         })
 
@@ -1586,7 +1742,6 @@ def merge_catalogs_with_llm(raw, topic_id, api_key, model, proxy_url):
         "normalized": {
             "content_elements": normalized_content,
             "skill_steps": skill_steps_out,
-            "skill_id_by_action_index": skill_id_by_action_index,
         },
         "usage": u,
     }

@@ -16,7 +16,9 @@ from migration_database import (
     save_analysis_prompt_version, write_default_analysis_prompt_file,
     get_skills_for_catalog, get_content_elements_for_catalog,
 )
-from migration_analysis_pipeline import run_task_analysis, build_analysis_prompt_page_payload
+from migration_analysis_pipeline import (
+    run_task_analysis, build_analysis_prompt_page_payload, commit_task_analysis_to_db,
+)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024  # 512 МБ
@@ -517,27 +519,61 @@ def api_analysis_prompt_write_file():
 def api_tasks_analyze():
     try:
         body = request.get_json() or {}
-        api_key = (body.get('api_key') or '').strip()
-        if not api_key:
-            return jsonify({'ok': False, 'error': 'Нужен API-ключ Anthropic'}), 400
+        provider = (body.get('provider') or 'anthropic').strip()
+        if provider == 'openrouter':
+            api_key = (body.get('openrouter_api_key') or '').strip()
+            if not api_key:
+                api_key = os.environ.get('OPENROUTER_API_KEY', '').strip()
+            if not api_key:
+                return jsonify({'ok': False, 'error': 'Нужен API-ключ OpenRouter'}), 400
+        else:
+            api_key = (body.get('api_key') or body.get('claude_api_key') or '').strip()
+            if not api_key:
+                api_key = os.environ.get('ANTHROPIC_API_KEY', '').strip()
+            if not api_key:
+                return jsonify({'ok': False, 'error': 'Нужен API-ключ Anthropic (Claude)'}), 400
+
         task_id = body.get('id', '')
         group_id = body.get('group_id', '')
         group_position = body.get('group_position', '')
         task = get_task_by_id_params(task_id, group_id, group_position)
         if not task:
             return jsonify({'ok': False, 'error': 'Задание не найдено'}), 404
-        model = body.get('model') or 'claude-sonnet-4-0'
+        model = body.get('model') or ('claude-sonnet-4-20250514' if provider == 'anthropic' else 'qwen/qwen3-235b-a22b-2507')
         proxy_url = (body.get('proxy_url') or '').strip() or None
-        result = run_task_analysis(task, api_key, model=model, proxy_url=proxy_url)
+        result = run_task_analysis(task, api_key, model=model, proxy_url=proxy_url, provider=provider)
         if not result.get('ok'):
             return jsonify(result), 400
-        fresh = get_task_by_id_params(task_id, group_id, group_position)
-        result['task'] = fresh
+        # Don't refresh task from DB yet — it hasn't been saved
         return jsonify(result)
     except Exception as e:
         import traceback
         app.logger.exception('api_tasks_analyze')
         payload = {'ok': False, 'error': f'Внутренняя ошибка сервера: {e}'}
+        if app.debug:
+            payload['traceback'] = traceback.format_exc()
+        return jsonify(payload), 500
+
+
+@app.route('/api/tasks/save-analysis', methods=['POST'])
+def api_tasks_save_analysis():
+    try:
+        body = request.get_json() or {}
+        save_data = body.get('save_data')
+        if not save_data or not isinstance(save_data, dict):
+            return jsonify({'ok': False, 'error': 'Нет save_data'}), 400
+        result = commit_task_analysis_to_db(save_data)
+        if not result.get('ok'):
+            return jsonify(result), 400
+        task_id = save_data.get('task_id', '')
+        group_id = save_data.get('group_id', '')
+        group_position = save_data.get('group_position', '')
+        fresh = get_task_by_id_params(task_id, group_id, group_position)
+        return jsonify({'ok': True, 'task': fresh})
+    except Exception as e:
+        import traceback
+        app.logger.exception('api_tasks_save_analysis')
+        payload = {'ok': False, 'error': f'Внутренняя ошибка: {e}'}
         if app.debug:
             payload['traceback'] = traceback.format_exc()
         return jsonify(payload), 500

@@ -389,26 +389,40 @@ function buildAnalysisMarkupSection(task) {
     </div>`;
 }
 
+// Хранит _save_data последнего анализа для кнопки "Сохранить в базу"
+let _lastAnalysisSaveData = null;
+
 async function runTaskAnalyze() {
-  const apiKey = localStorage.getItem('claude_api_key') || '';
-  if (!apiKey) {
-    showToast('Укажите API-ключ в настройках Claude', 'warning');
-    return;
-  }
+  const { model, provider, orKey, clKey } = getAiSettings();
   const task = state.currentTask;
   if (!task) return;
-  const model = localStorage.getItem('claude_model') || 'claude-sonnet-4-0';
-  const proxyUrl = (localStorage.getItem('claude_proxy_url') || '').trim();
-  setLoading(true, 'Анализ задания (Claude)…');
+
+  const payload = {
+    model, provider,
+    id: task.id || '',
+    group_id: task.group_id || '',
+    group_position: task.group_position || '',
+  };
+  if (provider === 'openrouter') {
+    if (!orKey) {
+      showToast('Укажите API-ключ OpenRouter на странице настроек AI', 'warning');
+      return;
+    }
+    payload.openrouter_api_key = orKey;
+  } else {
+    if (!clKey) {
+      showToast('Укажите API-ключ Claude на странице настроек AI', 'warning');
+      return;
+    }
+    payload.api_key = clKey;
+  }
+
+  _lastAnalysisSaveData = null;
+  const saveBtn = $('btn-save-analysis');
+  if (saveBtn) { saveBtn.style.display = 'none'; }
+
+  setLoading(true, 'Анализ задания…');
   try {
-    const payload = {
-      api_key: apiKey,
-      model,
-      id: task.id || '',
-      group_id: task.group_id || '',
-      group_position: task.group_position || '',
-    };
-    if (proxyUrl) payload.proxy_url = proxyUrl;
     const res = await fetch('/api/tasks/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -419,10 +433,27 @@ async function runTaskAnalyze() {
       showToast(data.error || 'Ошибка анализа', 'danger');
       return;
     }
-    state.currentTask = data.task;
-    renderTaskCard(state.currentTask, state.currentWrapper);
+    _lastAnalysisSaveData = data._save_data || null;
+    // Show analysis result in card without reloading from DB
+    if (data.result) {
+      // Temporarily enrich currentTask with analysis data for display
+      const r = data.result;
+      state.currentTask = Object.assign({}, task, {
+        analyzed_topic_id: r.topic_id,
+        analyzed_section: r.curriculum?.section || '',
+        analyzed_subsection: r.curriculum?.subsection || '',
+        analyzed_topic: r.curriculum?.topic || '',
+        analyzed_grade_class: r.curriculum?.grade_class || '',
+        analysis_result_json: JSON.stringify(r),
+        analysis_usage_json: JSON.stringify(data.usage_detail || {}),
+      });
+      renderTaskCard(state.currentTask, state.currentWrapper);
+    }
+    // Show "Сохранить в базу" button
+    const sb = $('btn-save-analysis');
+    if (sb && _lastAnalysisSaveData) { sb.style.display = ''; }
     const rub = data.cost_rub != null ? Number(data.cost_rub).toFixed(2) : '?';
-    showToast(`Анализ готов · ~${rub} ₽`);
+    showToast(`Анализ готов · ~${rub} ₽ · Нажмите «Сохранить в базу»`);
   } catch (e) {
     showToast(String(e.message || e), 'danger');
   } finally {
@@ -430,6 +461,39 @@ async function runTaskAnalyze() {
   }
 }
 window.runTaskAnalyze = runTaskAnalyze;
+
+async function runSaveAnalysis() {
+  if (!_lastAnalysisSaveData) {
+    showToast('Нет данных для сохранения — сначала запустите анализ', 'warning');
+    return;
+  }
+  setLoading(true, 'Сохранение в базу…');
+  try {
+    const res = await fetch('/api/tasks/save-analysis', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ save_data: _lastAnalysisSaveData }),
+    });
+    const data = await readResponseJson(res);
+    if (!res.ok || !data.ok) {
+      showToast(data.error || 'Ошибка сохранения', 'danger');
+      return;
+    }
+    _lastAnalysisSaveData = null;
+    const sb = $('btn-save-analysis');
+    if (sb) sb.style.display = 'none';
+    if (data.task) {
+      state.currentTask = data.task;
+      renderTaskCard(state.currentTask, state.currentWrapper);
+    }
+    showToast('Сохранено в базу');
+  } catch (e) {
+    showToast(String(e.message || e), 'danger');
+  } finally {
+    setLoading(false);
+  }
+}
+window.runSaveAnalysis = runSaveAnalysis;
 
 async function clearTaskAnalysis() {
   const task = state.currentTask;
@@ -592,6 +656,9 @@ function renderTaskCard(task, wrapper) {
         </button>
         <button class="btn btn-sm btn-primary" onclick="runTaskAnalyze()" id="btn-analyze-task" title="Решение + разметка + справочники">
           <i class="bi bi-diagram-2 me-1"></i>Анализ и разметка
+        </button>
+        <button class="btn btn-sm btn-success" onclick="runSaveAnalysis()" id="btn-save-analysis" title="Сохранить результат анализа в базу данных" style="display:none">
+          <i class="bi bi-floppy me-1"></i>Сохранить в базу
         </button>
         <button class="btn btn-sm btn-outline-danger" onclick="clearTaskAnalysis()" id="btn-clear-analysis" title="Удалить сохранённый анализ, JSON и связи с элементами/навыками">
           <i class="bi bi-eraser me-1"></i>Очистить разметку
@@ -979,19 +1046,16 @@ function toggleClaudePanel() {
 }
 
 async function sendToClaude() {
-  const apiKey = localStorage.getItem('claude_api_key') || '';
+  const { model, provider, orKey, clKey } = getAiSettings();
+  const apiKey = provider === 'openrouter' ? orKey : clKey;
   if (!apiKey) {
-    showToast('Укажите API-ключ Claude в настройках (кнопка 🤖 в шапке)', 'warning');
+    showToast('Укажите API-ключ на странице настроек AI (шестерёнка в шапке)', 'warning');
     return;
   }
   const task = state.currentTask;
   if (!task) return;
 
   const prompt = ($('claude-prompt') || {}).value || '';
-  const model  = localStorage.getItem('claude_model') || 'claude-sonnet-4-0';
-  const proxyUrl = (localStorage.getItem('claude_proxy_url') || '').trim();
-
-  // Строим текстовое представление задания (без base64 изображений)
   const taskText = task.text || '';
 
   const resultEl = $('claude-result');
@@ -1001,7 +1065,6 @@ async function sendToClaude() {
 
   try {
     const payload = { api_key: apiKey, model, prompt, task_text: taskText };
-    if (proxyUrl) payload.proxy_url = proxyUrl;
     const res = await fetch('/api/claude', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1011,7 +1074,6 @@ async function sendToClaude() {
     if (data.response) {
       if (responseEl) {
         responseEl.innerHTML = window.marked ? marked.parse(data.response) : escHtml(data.response).replace(/\n/g, '<br/>');
-        // Рендерим формулы в ответе
         if (window.MathJax && window.MathJax.typesetPromise) {
           window.MathJax.typesetPromise([responseEl]).catch(() => {});
         }
@@ -1069,31 +1131,27 @@ async function importFiles(files) {
   await loadTasks(1);
 }
 
-// ── Настройки Claude ───────────────────────────────────────
-const CLAUDE_LEGACY_MODELS = ['claude-3-5-haiku-20241022', 'claude-3-5-sonnet-20241022'];
+// ── Настройки AI-модели ───────────────────────────────────────
+function getAiSettings() {
+  const model    = localStorage.getItem('ai_model') || 'qwen/qwen3-235b-a22b-2507';
+  const provider = localStorage.getItem('ai_provider') || 'openrouter';
+  const orKey    = localStorage.getItem('openrouter_api_key') || '';
+  const clKey    = localStorage.getItem('claude_api_key') || '';
+  return { model, provider, orKey, clKey };
+}
 
 function loadClaudeSettings() {
-  const key    = localStorage.getItem('claude_api_key') || '';
-  let model    = localStorage.getItem('claude_model')   || 'claude-sonnet-4-0';
-  if (CLAUDE_LEGACY_MODELS.includes(model)) {
-    model = 'claude-sonnet-4-0';
-    localStorage.setItem('claude_model', model);
+  const { model, orKey, clKey } = getAiSettings();
+  // legacy modal fields (modal now has only prompt)
+  if ($('claude-default-prompt')) {
+    $('claude-default-prompt').value = localStorage.getItem('claude_default_prompt') ||
+      'Проверь и распознай формулы в задании. Реши задание, показав ход решения.';
   }
-  const proxy  = localStorage.getItem('claude_proxy_url') || '';
-  const prompt = localStorage.getItem('claude_default_prompt') ||
-    'Проверь и распознай формулы в задании. Реши задание, показав ход решения.';
-  if ($('claude-api-key'))       $('claude-api-key').value = key;
-  if ($('claude-model'))         $('claude-model').value = model;
-  if ($('claude-proxy-url'))     $('claude-proxy-url').value = proxy;
-  if ($('claude-default-prompt')) $('claude-default-prompt').value = prompt;
 }
 
 function saveClaudeSettings() {
-  localStorage.setItem('claude_api_key',       ($('claude-api-key') || {}).value || '');
-  localStorage.setItem('claude_model',         ($('claude-model') || {}).value || 'claude-sonnet-4-0');
-  localStorage.setItem('claude_proxy_url',     (($('claude-proxy-url') || {}).value || '').trim());
   localStorage.setItem('claude_default_prompt', ($('claude-default-prompt') || {}).value || '');
-  showToast('Настройки Claude сохранены');
+  showToast('Настройки сохранены');
 }
 
 // ── Вспомогательные ────────────────────────────────────────

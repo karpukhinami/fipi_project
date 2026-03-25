@@ -135,12 +135,12 @@
     <button class="btn btn-sm btn-outline-light" id="btn-export" title="Экспорт в JSON">
       <i class="bi bi-download"></i> Экспорт
     </button>
-    <!-- Настройки Claude -->
-    <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#modal-claude-settings" title="Настройки Claude">
+    <!-- Настройки AI -->
+    <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#modal-claude-settings" title="Промпт для «Отправить в Claude»">
       <i class="bi bi-robot"></i>
     </button>
-    <a class="btn btn-sm btn-outline-light" href="/proxy-test" title="Проверка прокси для Claude">
-      <i class="bi bi-shuffle"></i>
+    <a class="btn btn-sm btn-outline-light" href="/proxy-test" title="Настройки AI-модели">
+      <i class="bi bi-cpu"></i>
     </a>
     <a class="btn btn-sm btn-outline-light" href="/curriculum" title="Темы математики">
       <i class="bi bi-diagram-3"></i>
@@ -310,39 +310,18 @@
   </div>
 </div>
 
-<!-- ───── Модал: настройки Claude ───── -->
+<!-- ───── Модал: промпт для «Отправить в Claude» ───── -->
 <div class="modal fade" id="modal-claude-settings" tabindex="-1">
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title"><i class="bi bi-robot me-2"></i>Настройки Claude</h5>
+        <h5 class="modal-title"><i class="bi bi-robot me-2"></i>Промпт для «Отправить в Claude»</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
-        <div class="mb-3">
-          <label class="form-label fw-semibold">API-ключ Claude</label>
-          <input type="password" class="form-control" id="claude-api-key" placeholder="sk-ant-..."/>
-          <div class="form-text">
-            Ключ хранится только в браузере (localStorage). При «Отправить в Claude» он уходит на ваш локальный Flask
-            и дальше — в Anthropic; на диск сервера приложение его не пишет. Не используйте общий ПК без блокировки профиля.
-          </div>
-        </div>
-        <div class="mb-3">
-          <label class="form-label fw-semibold">HTTPS-прокси для запросов к Anthropic</label>
-          <input type="text" class="form-control font-monospace" id="claude-proxy-url" placeholder="http://127.0.0.1:7890" autocomplete="off"/>
-          <div class="form-text">
-            Необязательно. Формат как у переменной <code>HTTPS_PROXY</code>. Альтернатива: задать
-            <code>ANTHROPIC_HTTPS_PROXY</code> или <code>HTTPS_PROXY</code> в среде, где запущен Python — тогда поле можно не заполнять.
-          </div>
-        </div>
-        <div class="mb-3">
-          <label class="form-label fw-semibold">Модель</label>
-          <select class="form-select" id="claude-model">
-            <option value="claude-sonnet-4-0" selected>Claude Sonnet 4.0 (по умолчанию)</option>
-            <option value="claude-sonnet-4-20250514">Claude Sonnet 4 (снимок 20250514)</option>
-            <option value="claude-haiku-4-5">Claude Haiku 4.5 (быстрее)</option>
-            <option value="claude-opus-4-5">Claude Opus 4.5</option>
-          </select>
+        <div class="mb-2 text-muted small">
+          Используемая модель и ключи задаются на
+          <a href="/proxy-test" target="_blank"><i class="bi bi-cpu me-1"></i>странице настроек AI</a>.
         </div>
         <div class="mb-3">
           <label class="form-label fw-semibold">Промпт по умолчанию</label>

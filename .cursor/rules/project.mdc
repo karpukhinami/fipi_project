@@ -48,9 +48,34 @@ alwaysApply: true
 - Прокси для Anthropic API не нужен — сервер на Render имеет прямой доступ.
 - Переменные окружения на Render: `DATABASE_URL`, `SECRET_KEY`, `ANTHROPIC_API_KEY`.
 
+## Таблицы справочников
+
+### skill_defs — навыки / учебные действия
+Колонки:
+- id SERIAL PRIMARY KEY
+- label_normalized TEXT UNIQUE — нижний регистр, пробелы схлопнуты (ключ дедупликации)
+- label_display TEXT — читаемое название для отображения
+- frp_label TEXT — исходная формулировка из ФРП (до атомизации LLM; совпадает с label_display если без LLM)
+- default_topic_id INTEGER — ссылка на math_curriculum_topics(id), может быть NULL
+- frp_topic_id INTEGER — ссылка на frp_topics(id), может быть NULL
+
+### content_element_defs — элементы содержания
+Структура идентична skill_defs (включая frp_label и frp_topic_id).
+
+### math_curriculum_topics — справочник тем куррикулума (только чтение)
+Колонки: id, subject, section, subsection, topic, topic_description, grade_class
+Используется для привязки навыков/элементов к теме через default_topic_id.
+
+### frp_topics — темы ФРП (основной справочник)
+Колонки: id, grade_class, subject, section, topic, program
+Уникальное ограничение: (grade_class, subject, section, topic).
+Все текстовые поля хранятся в нижнем регистре, без лишних пробелов.
+Заполняется скриптом load_frp_topics.py (из другого приложения и репозитория generate_sql.py + Neon SQL Editor).
+
 ## Стиль ответов
 
 - Всегда отвечать на русском языке.
+- Говорить о себе в мужском роде.
 - Не предлагать запуск терминала без необходимости.
 - Не создавать `.md` файлы без явного запроса.
 - Не создавать тестовые файлы без явного запроса.

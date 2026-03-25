@@ -262,19 +262,20 @@ def init_db():
 # ---------------------------------------------------------------------------
 
 def get_curriculum_topics(subject=None):
+    """Returns topics from frp_topics, mapped to the same dict shape as before."""
     conn = get_conn()
     if subject:
         rows = conn.execute(
-            '''SELECT id, subject, section, subsection, topic, topic_description, grade_class
-               FROM math_curriculum_topics WHERE lower(subject) = lower(%s)
-               ORDER BY section, subsection, topic''',
+            '''SELECT id, subject, section, '' AS subsection, topic, COALESCE(program, '') AS topic_description, grade_class
+               FROM frp_topics WHERE lower(subject) = lower(%s)
+               ORDER BY section, topic''',
             (subject,),
         ).fetchall()
     else:
         rows = conn.execute(
-            '''SELECT id, subject, section, subsection, topic, topic_description, grade_class
-               FROM math_curriculum_topics
-               ORDER BY subject, section, subsection, topic''',
+            '''SELECT id, subject, section, '' AS subsection, topic, COALESCE(program, '') AS topic_description, grade_class
+               FROM frp_topics
+               ORDER BY subject, section, topic''',
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -283,7 +284,9 @@ def get_curriculum_topics(subject=None):
 def get_curriculum_topic(topic_id):
     conn = get_conn()
     row = conn.execute(
-        'SELECT * FROM math_curriculum_topics WHERE id = %s', (int(topic_id),)
+        '''SELECT id, subject, section, '' AS subsection, topic, COALESCE(program, '') AS topic_description, grade_class
+           FROM frp_topics WHERE id = %s''',
+        (int(topic_id),)
     ).fetchone()
     conn.close()
     return dict(row) if row else None
@@ -520,7 +523,7 @@ def clear_task_analysis(task_id, group_id, group_position):
     return True
 
 
-def upsert_content_element(label_display, default_topic_id=None):
+def upsert_content_element(label_display, frp_topic_id=None):
     import re
     s = (label_display or '').strip()
     if not s:
@@ -535,9 +538,9 @@ def upsert_content_element(label_display, default_topic_id=None):
         conn.close()
         return rid
     cur = conn.execute(
-        '''INSERT INTO content_element_defs (label_normalized, label_display, default_topic_id)
+        '''INSERT INTO content_element_defs (label_normalized, label_display, frp_topic_id)
            VALUES (%s,%s,%s) RETURNING id''',
-        (key, s, default_topic_id),
+        (key, s, frp_topic_id),
     )
     rid = cur.fetchone()[0]
     conn.commit()
@@ -545,7 +548,7 @@ def upsert_content_element(label_display, default_topic_id=None):
     return rid
 
 
-def upsert_skill(label_display, default_topic_id=None):
+def upsert_skill(label_display, frp_topic_id=None):
     import re
     s = (label_display or '').strip()
     if not s:
@@ -560,9 +563,9 @@ def upsert_skill(label_display, default_topic_id=None):
         conn.close()
         return rid
     cur = conn.execute(
-        '''INSERT INTO skill_defs (label_normalized, label_display, default_topic_id)
+        '''INSERT INTO skill_defs (label_normalized, label_display, frp_topic_id)
            VALUES (%s,%s,%s) RETURNING id''',
-        (key, s, default_topic_id),
+        (key, s, frp_topic_id),
     )
     rid = cur.fetchone()[0]
     conn.commit()
@@ -631,116 +634,104 @@ def enrich_task_analysis_display(task_dict):
         return
     conn = get_conn()
     row = conn.execute(
-        'SELECT 1 FROM math_curriculum_topics WHERE id = %s', (tid_int,)
+        'SELECT 1 FROM frp_topics WHERE id = %s', (tid_int,)
     ).fetchone()
     conn.close()
     task_dict['analysis_topic_linked'] = row is not None
 
 
 def get_curriculum_subsections(subject=None):
-    """Returns unique (section, subsection) pairs with topic count."""
+    """Returns unique sections with topic count from frp_topics (no subsections)."""
     conn = get_conn()
     if subject:
         rows = conn.execute(
-            '''SELECT section, subsection, COUNT(*) as topic_count
-               FROM math_curriculum_topics
+            '''SELECT section, '' AS subsection, COUNT(*) as topic_count
+               FROM frp_topics
                WHERE subject = %s
-               GROUP BY section, subsection
-               ORDER BY section, subsection''',
+               GROUP BY section
+               ORDER BY section''',
             (subject,),
         ).fetchall()
     else:
         rows = conn.execute(
-            '''SELECT section, subsection, COUNT(*) as topic_count
-               FROM math_curriculum_topics
-               GROUP BY section, subsection
-               ORDER BY section, subsection'''
+            '''SELECT section, '' AS subsection, COUNT(*) as topic_count
+               FROM frp_topics
+               GROUP BY section
+               ORDER BY section'''
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
 def get_topics_by_subsection(section, subsection):
-    """Returns all topics for a given (section, subsection) pair."""
+    """Returns all topics for a given section from frp_topics."""
     conn = get_conn()
-    subsection_val = subsection or ''
     rows = conn.execute(
-        '''SELECT id, subject, section, subsection, topic, topic_description, grade_class
-           FROM math_curriculum_topics
+        '''SELECT id, subject, section, '' AS subsection, topic, COALESCE(program, '') AS topic_description, grade_class
+           FROM frp_topics
            WHERE section = %s
-             AND (subsection = %s OR (%s = '' AND (subsection IS NULL OR subsection = '')))
            ORDER BY grade_class, topic''',
-        (section, subsection_val, subsection_val),
+        (section,),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
 def get_skills_for_catalog(subject=None, section=None, subsection=None, topic_id=None):
-    """Returns skill_defs with topic hierarchy, filtered by curriculum position."""
+    """Returns skill_defs with topic hierarchy from frp_topics via frp_topic_id."""
     conn = get_conn()
     where_parts = []
     params = []
     if topic_id is not None:
-        where_parts.append('sd.default_topic_id = %s')
+        where_parts.append('sd.frp_topic_id = %s')
         params.append(topic_id)
     else:
         if subject is not None:
-            where_parts.append('mct.subject = %s')
+            where_parts.append('ft.subject = %s')
             params.append(subject)
         if section is not None:
-            where_parts.append('mct.section = %s')
+            where_parts.append('ft.section = %s')
             params.append(section)
-        if subsection is not None:
-            subsection_val = subsection or ''
-            where_parts.append(
-                "(mct.subsection = %s OR (%s = '' AND (mct.subsection IS NULL OR mct.subsection = '')))"
-            )
-            params.extend([subsection_val, subsection_val])
+        # subsection filter ignored: frp_topics has no subsection column
     base_query = (
-        'SELECT sd.id, sd.label_display,'
-        ' mct.subject, mct.section, mct.subsection, mct.topic, mct.grade_class'
-        ' FROM skill_defs sd'
-        ' LEFT JOIN math_curriculum_topics mct ON mct.id = sd.default_topic_id'
+        "SELECT sd.id, sd.label_display,"
+        " ft.subject, ft.section, '' AS subsection, ft.topic, ft.grade_class"
+        " FROM skill_defs sd"
+        " LEFT JOIN frp_topics ft ON ft.id = sd.frp_topic_id"
     )
     if where_parts:
         base_query += ' WHERE ' + ' AND '.join(where_parts)
-    base_query += ' ORDER BY mct.section, mct.subsection, mct.topic, sd.label_display'
+    base_query += ' ORDER BY ft.section, ft.topic, sd.label_display'
     rows = conn.execute(base_query, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
 def get_content_elements_for_catalog(subject=None, section=None, subsection=None, topic_id=None):
-    """Returns content_element_defs with topic hierarchy, filtered by curriculum position."""
+    """Returns content_element_defs with topic hierarchy from frp_topics via frp_topic_id."""
     conn = get_conn()
     where_parts = []
     params = []
     if topic_id is not None:
-        where_parts.append('ced.default_topic_id = %s')
+        where_parts.append('ced.frp_topic_id = %s')
         params.append(topic_id)
     else:
         if subject is not None:
-            where_parts.append('mct.subject = %s')
+            where_parts.append('ft.subject = %s')
             params.append(subject)
         if section is not None:
-            where_parts.append('mct.section = %s')
+            where_parts.append('ft.section = %s')
             params.append(section)
-        if subsection is not None:
-            subsection_val = subsection or ''
-            where_parts.append(
-                "(mct.subsection = %s OR (%s = '' AND (mct.subsection IS NULL OR mct.subsection = '')))"
-            )
-            params.extend([subsection_val, subsection_val])
+        # subsection filter ignored: frp_topics has no subsection column
     base_query = (
-        'SELECT ced.id, ced.label_display,'
-        ' mct.subject, mct.section, mct.subsection, mct.topic, mct.grade_class'
-        ' FROM content_element_defs ced'
-        ' LEFT JOIN math_curriculum_topics mct ON mct.id = ced.default_topic_id'
+        "SELECT ced.id, ced.label_display,"
+        " ft.subject, ft.section, '' AS subsection, ft.topic, ft.grade_class"
+        " FROM content_element_defs ced"
+        " LEFT JOIN frp_topics ft ON ft.id = ced.frp_topic_id"
     )
     if where_parts:
         base_query += ' WHERE ' + ' AND '.join(where_parts)
-    base_query += ' ORDER BY mct.section, mct.subsection, mct.topic, ced.label_display'
+    base_query += ' ORDER BY ft.section, ft.topic, ced.label_display'
     rows = conn.execute(base_query, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -1302,22 +1293,6 @@ def get_filter_options():
 
 def _ensure_analysis_defaults():
     conn = get_conn()
-    n = conn.execute('SELECT COUNT(*) FROM math_curriculum_topics').fetchone()[0]
-    if n == 0:
-        samples = [
-            ('Математика', 'Алгебра', 'Целые выражения', 'Одночлены и многочлены',
-             'Операции с одночленами и многочленами', '7'),
-            ('Математика', 'Алгебра', 'Уравнения', 'Линейные уравнения',
-             'Решение линейных уравнений с одной переменной', '7'),
-            ('Математика', 'Геометрия', 'Треугольники', 'Теорема Пифагора',
-             'Применение теоремы Пифагора', '8'),
-        ]
-        conn.executemany(
-            '''INSERT INTO math_curriculum_topics
-               (subject, section, subsection, topic, topic_description, grade_class)
-               VALUES (%s,%s,%s,%s,%s,%s)''',
-            samples,
-        )
     row = conn.execute('SELECT body FROM analysis_prompts WHERE id = 1').fetchone()
     now = datetime.now().isoformat()
     file_text = read_default_analysis_prompt_file()
