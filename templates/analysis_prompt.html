@@ -8,29 +8,86 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
   <style>
     body { background: #f5f7fa; }
-    #body { font-family: ui-monospace, monospace; font-size: .82rem; line-height: 1.4; min-height: 420px; }
+    #body { font-family: ui-monospace, monospace; font-size: .82rem; line-height: 1.4; min-height: 480px; }
     .help-panel { font-size: .85rem; white-space: pre-wrap; background: #f1f5f9; border-radius: 8px; }
     .user-msg-panel textarea { font-family: ui-monospace, monospace; font-size: .8rem; background: #f8fafc; }
+    #diff-output { font-family: ui-monospace, monospace; font-size: .78rem; line-height: 1.4;
+                   max-height: 400px; overflow: auto; background: #1e1e2e; color: #cdd6f4;
+                   border-radius: 6px; padding: 10px 12px; white-space: pre; }
+    .diff-add  { background: #1c3626; color: #a6e3a1; display: block; }
+    .diff-rem  { background: #3b1a1a; color: #f38ba8; display: block; }
+    .diff-ctx  { color: #6c7086; display: block; }
+    .source-badge { font-size: .72rem; padding: 2px 7px; border-radius: 10px; }
+    .badge-file  { background: #d1fae5; color: #065f46; }
+    .badge-saved { background: #dbeafe; color: #1e40af; }
   </style>
 </head>
 <body class="p-3">
 <div class="container-fluid" style="max-width:1100px">
+
   <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
     <a href="/" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> К базе</a>
-    <h1 class="h4 mb-0">Промпт анализа (полный system)</h1>
+    <h1 class="h4 mb-0">Промпт анализа</h1>
+    <span id="source-badge" class="source-badge badge-file">из файла</span>
   </div>
-  <p class="text-muted small">Редактируется <strong>весь</strong> system-промпт первого запроса к модели. Тот же базовый текст лежит в файле <code class="small">prompts/default_analysis_system_prompt.txt</code> — его можно менять без браузера; затем <code class="small">python sync_analysis_prompt_from_file.py</code> или очистите промпт здесь и перезапустите приложение (пустое поле подтянется из файла при <code>init_db</code>). Плейсхолдеры в фигурных скобках подставляет сервер. Условие и решение — в сообщении <strong>user</strong>.</p>
-  <p class="small text-secondary"><code>{json_output_strict}</code> подставляется из кода. Схема JSON и правила полей: файлы <code>prompts/analysis_json_schema.txt</code> и <code>prompts/analysis_field_rules.txt</code> (то же текстом встроено в <code>default_analysis_system_prompt.txt</code>). Если в шаблоне в БД оставлены <code>{analysis_json_schema}</code> / <code>{analysis_field_rules}</code>, при анализе подставляется содержимое этих .txt. Справка: <code>prompts/analysis_api_response_reference.txt</code>.</p>
-  <p class="small text-secondary mb-2">В базе сохранено · <span id="updated">—</span></p>
 
+  <div class="alert alert-info py-2 px-3 small mb-3">
+    <strong>Активный промпт</strong> — всегда берётся из файла
+    <code>prompts/default_analysis_system_prompt.txt</code>.
+    Кнопка <strong>Сохранить версию</strong> добавляет снимок в историю БД (не меняет файл и не влияет на анализ).
+    Кнопка <strong>Сохранить как основной</strong> перезаписывает файл — на Render изменение действует
+    до следующего деплоя; для постоянного эффекта нужно закоммитить файл в git.
+  </div>
+
+  <!-- Панель версий -->
+  <div class="row g-2 mb-2 align-items-end">
+    <div class="col-auto">
+      <label class="form-label small mb-1">История версий (БД)</label>
+      <select class="form-select form-select-sm" id="sel-versions" style="min-width:280px">
+        <option value="">— выберите сохранённую версию —</option>
+      </select>
+    </div>
+    <div class="col-auto">
+      <button class="btn btn-sm btn-outline-primary" id="btn-load-version" disabled>
+        <i class="bi bi-cloud-download me-1"></i>Загрузить
+      </button>
+    </div>
+    <div class="col-auto ms-auto">
+      <button class="btn btn-sm btn-outline-secondary" id="btn-load-file">
+        <i class="bi bi-file-earmark-text me-1"></i>Вернуть из файла
+      </button>
+    </div>
+  </div>
+
+  <!-- Кнопки действий -->
   <div class="d-flex flex-wrap gap-2 mb-2">
-    <button type="button" class="btn btn-primary" id="btn-save"><i class="bi bi-floppy me-1"></i>Сохранить</button>
-    <button type="button" class="btn btn-outline-secondary" id="btn-default" title="Подставить встроенный шаблон в поле (не сохраняет автоматически)">
-      <i class="bi bi-file-earmark-text me-1"></i>Шаблон по умолчанию
+    <div class="input-group input-group-sm" style="max-width:400px">
+      <input type="text" class="form-control" id="inp-label" placeholder="Метка версии (необязательно)">
+      <button class="btn btn-primary" id="btn-save">
+        <i class="bi bi-floppy me-1"></i>Сохранить версию
+      </button>
+    </div>
+    <button class="btn btn-sm btn-success" id="btn-write-file">
+      <i class="bi bi-star me-1"></i>Сохранить как основной
+    </button>
+    <button class="btn btn-sm btn-outline-info" id="btn-diff" title="Показать отличия текущего текста от файла">
+      <i class="bi bi-file-diff me-1"></i>Показать diff
     </button>
   </div>
 
-  <textarea class="form-control mb-3" id="body" spellcheck="false" placeholder="Полный system-промпт…"></textarea>
+  <textarea class="form-control mb-2" id="body" spellcheck="false" placeholder="Полный system-промпт…"></textarea>
+
+  <!-- Diff панель -->
+  <div id="diff-panel" class="d-none mb-3">
+    <div class="d-flex align-items-center gap-2 mb-1">
+      <span class="fw-semibold small">Отличия от файла</span>
+      <span class="badge bg-secondary" id="diff-stats"></span>
+      <button class="btn btn-sm btn-outline-secondary ms-auto" id="btn-hide-diff">
+        <i class="bi bi-x"></i> Скрыть
+      </button>
+    </div>
+    <pre id="diff-output"></pre>
+  </div>
 
   <div class="accordion mb-3" id="acc-help">
     <div class="accordion-item">
@@ -50,22 +107,47 @@
       </div>
     </div>
   </div>
+
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/diff@5.2.0/dist/diff.min.js"></script>
 <script>
-let _defaultTemplate = '';
+let _fileBody = '';
+let _currentSource = 'file'; // 'file' | 'version'
+
+function setSourceBadge(source, label) {
+  const el = document.getElementById('source-badge');
+  if (source === 'file') {
+    el.className = 'source-badge badge-file';
+    el.textContent = 'из файла';
+  } else {
+    el.className = 'source-badge badge-saved';
+    el.textContent = label ? 'версия: ' + label : 'сохранённая версия';
+  }
+  _currentSource = source;
+}
+
+function populateVersions(versions) {
+  const sel = document.getElementById('sel-versions');
+  sel.innerHTML = '<option value="">— выберите сохранённую версию —</option>';
+  (versions || []).forEach(v => {
+    const opt = document.createElement('option');
+    opt.value = v.id;
+    const dt = v.created_at ? v.created_at.replace('T', ' ').slice(0, 16) : '';
+    opt.textContent = (v.label ? v.label + ' · ' : '') + dt;
+    sel.appendChild(opt);
+  });
+}
 
 function applyLoaded(d) {
-  document.getElementById('updated').textContent = d.updated_at || '—';
+  _fileBody = d.file_body || '';
   document.getElementById('placeholders-help').textContent = d.placeholders_help || '';
   document.getElementById('user-desc').value = d.user_message_description || '';
-  _defaultTemplate = d.default_system_template || '';
+  populateVersions(d.versions || []);
   const ta = document.getElementById('body');
-  if (d.body && d.body.trim()) {
-    ta.value = d.body;
-  } else {
-    ta.value = _defaultTemplate;
-  }
+  ta.value = _fileBody;
+  setSourceBadge('file');
+  hideDiff();
 }
 
 async function load() {
@@ -74,24 +156,126 @@ async function load() {
   applyLoaded(d);
 }
 
-document.getElementById('btn-default').addEventListener('click', () => {
-  if (!_defaultTemplate) return;
-  if (!confirm('Заменить текст в поле на встроенный шаблон? Несохранённые правки пропадут.')) return;
-  document.getElementById('body').value = _defaultTemplate;
+// ── версии ──
+document.getElementById('sel-versions').addEventListener('change', function() {
+  document.getElementById('btn-load-version').disabled = !this.value;
 });
 
+document.getElementById('btn-load-version').addEventListener('click', async () => {
+  const vid = document.getElementById('sel-versions').value;
+  if (!vid) return;
+  const res = await fetch(`/api/analysis-prompt/version/${vid}`);
+  if (!res.ok) { alert('Не удалось загрузить версию'); return; }
+  const v = await res.json();
+  document.getElementById('body').value = v.body || '';
+  const sel = document.getElementById('sel-versions');
+  const label = sel.options[sel.selectedIndex]?.textContent || '';
+  setSourceBadge('version', v.label || label);
+  hideDiff();
+});
+
+document.getElementById('btn-load-file').addEventListener('click', () => {
+  if (!_fileBody) return;
+  if (document.getElementById('body').value !== _fileBody) {
+    if (!confirm('Заменить текст в поле на версию из файла? Несохранённые правки пропадут.')) return;
+  }
+  document.getElementById('body').value = _fileBody;
+  setSourceBadge('file');
+  hideDiff();
+});
+
+// ── сохранить версию ──
 document.getElementById('btn-save').addEventListener('click', async () => {
+  const label = document.getElementById('inp-label').value.trim();
   const res = await fetch('/api/analysis-prompt', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ body: document.getElementById('body').value }),
+    body: JSON.stringify({ body: document.getElementById('body').value, label }),
   });
   const d = await res.json();
   if (res.ok) {
-    applyLoaded(d);
-    alert('Сохранено');
+    populateVersions(d.versions || []);
+    document.getElementById('inp-label').value = '';
+    showToast('Версия сохранена в историю БД');
   } else alert(d.error || 'Ошибка');
 });
+
+// ── сохранить как основной ──
+document.getElementById('btn-write-file').addEventListener('click', async () => {
+  if (!confirm(
+    'Перезаписать файл prompts/default_analysis_system_prompt.txt?\n\n' +
+    'На Render изменение действует до следующего деплоя. ' +
+    'Для постоянного сохранения закоммитьте файл в git.'
+  )) return;
+  const label = document.getElementById('inp-label').value.trim() || 'write-file';
+  const res = await fetch('/api/analysis-prompt/write-file', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ body: document.getElementById('body').value, label }),
+  });
+  const d = await res.json();
+  if (res.ok) {
+    _fileBody = document.getElementById('body').value;
+    populateVersions(d.versions || []);
+    setSourceBadge('file');
+    hideDiff();
+    document.getElementById('inp-label').value = '';
+    showToast('Файл перезаписан и версия сохранена в БД');
+  } else alert(d.error || 'Ошибка записи файла');
+});
+
+// ── diff ──
+document.getElementById('btn-diff').addEventListener('click', () => showDiff());
+document.getElementById('btn-hide-diff').addEventListener('click', hideDiff);
+
+function hideDiff() {
+  document.getElementById('diff-panel').classList.add('d-none');
+}
+
+function showDiff() {
+  const current = document.getElementById('body').value;
+  if (current === _fileBody) {
+    document.getElementById('diff-output').innerHTML =
+      '<span class="diff-ctx">  (текст совпадает с файлом)</span>';
+    document.getElementById('diff-stats').textContent = 'нет отличий';
+    document.getElementById('diff-panel').classList.remove('d-none');
+    return;
+  }
+  const parts = Diff.diffLines(_fileBody, current);
+  let html = '';
+  let added = 0, removed = 0;
+  parts.forEach(part => {
+    const lines = part.value.replace(/\n$/, '').split('\n');
+    lines.forEach(line => {
+      if (part.added) {
+        html += `<span class="diff-add">+ ${escHtml(line)}</span>`;
+        added++;
+      } else if (part.removed) {
+        html += `<span class="diff-rem">- ${escHtml(line)}</span>`;
+        removed++;
+      } else {
+        html += `<span class="diff-ctx">  ${escHtml(line)}</span>`;
+      }
+    });
+  });
+  document.getElementById('diff-output').innerHTML = html;
+  document.getElementById('diff-stats').textContent = `+${added} / -${removed} строк`;
+  document.getElementById('diff-panel').classList.remove('d-none');
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── тост ──
+function showToast(msg) {
+  const t = document.createElement('div');
+  t.style.cssText = 'position:fixed;bottom:20px;right:20px;background:#1e293b;color:#fff;' +
+    'padding:10px 18px;border-radius:8px;font-size:.85rem;z-index:9999;box-shadow:0 2px 12px #0004';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2500);
+}
 
 load();
 </script>

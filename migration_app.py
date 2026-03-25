@@ -12,6 +12,8 @@ from migration_database import (
     get_attachment_data, get_curriculum_topics, update_curriculum_topic,
     add_curriculum_topic, delete_curriculum_topic, import_math_curriculum_from_xlsx,
     get_analysis_prompt, set_analysis_prompt,
+    get_analysis_prompt_versions, get_analysis_prompt_version_by_id,
+    save_analysis_prompt_version, write_default_analysis_prompt_file,
     get_skills_for_catalog, get_content_elements_for_catalog,
 )
 from migration_analysis_pipeline import run_task_analysis, build_analysis_prompt_page_payload
@@ -480,7 +482,32 @@ def api_analysis_prompt_get():
 @app.route('/api/analysis-prompt', methods=['POST'])
 def api_analysis_prompt_set():
     body = request.get_json() or {}
-    set_analysis_prompt(body.get('body', ''))
+    prompt_body = body.get('body', '')
+    label = (body.get('label') or '').strip()
+    save_analysis_prompt_version(prompt_body, label or None)
+    payload = build_analysis_prompt_page_payload()
+    payload['ok'] = True
+    return jsonify(payload)
+
+
+@app.route('/api/analysis-prompt/version/<int:vid>', methods=['GET'])
+def api_analysis_prompt_version(vid):
+    v = get_analysis_prompt_version_by_id(vid)
+    if not v:
+        return jsonify({'error': 'Версия не найдена'}), 404
+    return jsonify(v)
+
+
+@app.route('/api/analysis-prompt/write-file', methods=['POST'])
+def api_analysis_prompt_write_file():
+    body = request.get_json() or {}
+    text = body.get('body', '')
+    if not text.strip():
+        return jsonify({'ok': False, 'error': 'Пустой текст'}), 400
+    ok = write_default_analysis_prompt_file(text)
+    if not ok:
+        return jsonify({'ok': False, 'error': 'Не удалось записать файл'}), 500
+    save_analysis_prompt_version(text, (body.get('label') or '').strip() or 'write-file')
     payload = build_analysis_prompt_page_payload()
     payload['ok'] = True
     return jsonify(payload)
