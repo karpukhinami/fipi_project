@@ -20,6 +20,11 @@ try:
 except ImportError:
     Image = None  # type: ignore[misc, assignment]
     UnidentifiedImageError = ValueError  # type: ignore[misc, assignment]
+
+try:
+    import cairosvg as _cairosvg  # type: ignore[import-untyped]
+except Exception:
+    _cairosvg = None  # type: ignore[assignment]
 from rapidfuzz import fuzz, process
 
 from migration_database import (
@@ -929,8 +934,34 @@ def _image_bytes_to_png_b64(raw: bytes) -> Optional[str]:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _prepare_image_for_anthropic(mime: str, b64: str) -> Optional[Tuple[str, str]]:
+def _svg_bytes_to_png_b64(raw: bytes, width: Optional[int] = None, height: Optional[int] = None) -> Optional[str]:
+    """Конвертирует SVG-байты в PNG base64. Размер берётся из width/height (если заданы)."""
+    if _cairosvg is None:
+        return None
+    try:
+        kwargs: dict = {}
+        if width:
+            kwargs["output_width"] = int(width)
+        if height:
+            kwargs["output_height"] = int(height)
+        png_bytes = _cairosvg.svg2png(bytestring=raw, **kwargs)
+        return base64.b64encode(png_bytes).decode("ascii")
+    except Exception:
+        return None
+
+
+def _prepare_image_for_anthropic(
+    mime: str, b64: str, width: Optional[int] = None, height: Optional[int] = None
+) -> Optional[Tuple[str, str]]:
     m = _normalize_image_mime(mime)
+    # SVG обрабатываем отдельно через cairosvg
+    if m in ("image/svg+xml", "image/svg"):
+        try:
+            raw = base64.b64decode(b64, validate=False)
+        except (ValueError, TypeError):
+            return None
+        png_b64 = _svg_bytes_to_png_b64(raw, width=width, height=height)
+        return ("image/png", png_b64) if png_b64 else None
     if m in _ANTHROPIC_IMAGE_MIME_ALLOWED:
         return m, b64
     try:
@@ -1521,7 +1552,12 @@ def run_image_recognition(
     skipped: List[str] = []
     sent_filenames: List[str] = []
     for filename, imgdata in images.items():
-        prepared = _prepare_image_for_anthropic(imgdata.get("mime", "image/png"), imgdata.get("data", ""))
+        w = imgdata.get("width") or None
+        h = imgdata.get("height") or None
+        prepared = _prepare_image_for_anthropic(
+            imgdata.get("mime", "image/png"), imgdata.get("data", ""),
+            width=int(w) if w else None, height=int(h) if h else None,
+        )
         if prepared is None:
             skipped.append(filename)
             continue
