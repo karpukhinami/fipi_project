@@ -458,6 +458,51 @@ async function runTaskAnalyze() {
 }
 window.runTaskAnalyze = runTaskAnalyze;
 
+async function runTaskSolve() {
+  const { model, provider, clKey } = getAiSettings();
+  const task = state.currentTask;
+  if (!task) return;
+
+  const payload = {
+    model, provider,
+    id: task.id || '',
+    group_id: task.group_id || '',
+    group_position: task.group_position || '',
+  };
+  if (provider !== 'openrouter') {
+    if (!clKey) {
+      showToast('Укажите API-ключ Claude на странице настроек AI', 'warning');
+      return;
+    }
+    payload.api_key = clKey;
+  }
+
+  setLoading(true, 'Решаю задание…');
+  try {
+    const res = await fetch('/api/tasks/solve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await readResponseJson(res);
+    if (!res.ok || !data.ok) {
+      showToast(data.error || 'Ошибка', 'danger');
+      return;
+    }
+    if (data.task) {
+      state.currentTask = data.task;
+      renderTaskCard(data.task, state.currentWrapper);
+    }
+    const rub = data.cost_rub != null ? Number(data.cost_rub).toFixed(2) : '?';
+    showToast(`Решение готово и сохранено · ~${rub} ₽`);
+  } catch (e) {
+    showToast(String(e.message || e), 'danger');
+  } finally {
+    setLoading(false);
+  }
+}
+window.runTaskSolve = runTaskSolve;
+
 async function runSaveAnalysis() {
   if (!_lastAnalysisSaveData) {
     showToast('Нет данных для сохранения — сначала запустите анализ', 'warning');
@@ -652,6 +697,9 @@ function renderTaskCard(task, wrapper) {
         </button>
         <button class="btn btn-sm btn-primary" onclick="runTaskAnalyze()" id="btn-analyze-task" title="Решение + разметка + справочники">
           <i class="bi bi-diagram-2 me-1"></i>Анализ и разметка
+        </button>
+        <button class="btn btn-sm btn-outline-success" onclick="runTaskSolve()" id="btn-solve-task" title="Только решить и записать в поля Решение и Ответ">
+          <i class="bi bi-calculator me-1"></i>Решить
         </button>
         <button class="btn btn-sm btn-success" onclick="runSaveAnalysis()" id="btn-save-analysis" title="Сохранить результат анализа в базу данных" style="display:none">
           <i class="bi bi-floppy me-1"></i>Сохранить в базу

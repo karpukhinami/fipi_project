@@ -1321,6 +1321,80 @@ def _is_math_subject(subject: str) -> bool:
     return False
 
 
+SOLVE_SYSTEM_PROMPT = """Ты — учитель математики. Реши задание пошагово.
+
+Требования к ответу:
+- Только один JSON-объект: {"solution_steps": [...], "final_answer": "..."}
+- solution_steps — массив строк, каждый элемент — один шаг решения
+- final_answer — строка с ответом для ученика
+- Формулы записывай в LaTeX через одиночный доллар ($формула$)
+- Markdown-форматирование разрешено (жирный, курсив, ненумерованный список)
+- Первый непробельный символ «{», последний значимый «}», без блоков ```, без пояснений вне JSON"""
+
+
+def run_task_solve(
+    task: dict,
+    api_key: str,
+    model: str = "claude-sonnet-4-20250514",
+    proxy_url: Optional[str] = None,
+    provider: str = "anthropic",
+) -> dict:
+    """Call AI to solve the task only (no analysis). Returns solution_steps + final_answer."""
+    body_text = (task.get("formatted_text") or "").strip() or (task.get("text") or "")
+    images = collect_images_for_analysis_task(task)
+
+    user_parts = build_message_content(body_text, images)
+    messages = [{"role": "user", "content": user_parts}]
+
+    usage_total = {"input_tokens": 0, "output_tokens": 0}
+    try:
+        text, u = call_ai(api_key, model, messages, SOLVE_SYSTEM_PROMPT,
+                          max_tokens=4096, proxy_url=proxy_url, provider=provider)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    usage_total["input_tokens"] += u["input_tokens"]
+    usage_total["output_tokens"] += u["output_tokens"]
+
+    raw: Optional[dict] = None
+    try:
+        raw = extract_json_object(text)
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"Не удалось разобрать JSON ответа: {e}",
+            "raw_text": text[:3000],
+            "usage": usage_total,
+        }
+
+    steps = raw.get("solution_steps")
+    if not isinstance(steps, list):
+        steps = [_as_str(steps)] if steps else []
+    else:
+        steps = [_as_str(s) for s in steps if _as_str(s)]
+
+    final_answer = _as_str(raw.get("final_answer") or "")
+
+    solution_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps) if s)
+    if final_answer:
+        solution_text = (solution_text + "\n\nОтвет: " + final_answer).strip()
+
+    inp_p, out_p = model_pricing(model, provider)
+    cost_usd = (usage_total["input_tokens"] / 1_000_000) * inp_p + \
+               (usage_total["output_tokens"] / 1_000_000) * out_p
+    cost_rub = cost_usd * RUB_PER_USD
+
+    return {
+        "ok": True,
+        "solution_steps": steps,
+        "final_answer": final_answer,
+        "solution_text": solution_text,
+        "usage": usage_total,
+        "cost_usd": round(cost_usd, 5),
+        "cost_rub": round(cost_rub, 3),
+    }
+
+
 def run_task_analysis(
     task: dict,
     api_key: str,
