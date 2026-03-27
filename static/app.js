@@ -46,11 +46,36 @@ const loadingOverlay = $('loading-overlay');
 const loadingText    = $('loading-text');
 
 // ── Тост ───────────────────────────────────────────────────
-function showToast(msg, type = 'success') {
+function showToast(msg, type = 'success', details = null) {
   const el = $('toast-main');
-  $('toast-body').textContent = msg;
+  const bodyEl = $('toast-body');
+
+  // Dispose existing instance to allow option changes between calls
+  const existing = bootstrap.Toast.getInstance(el);
+  if (existing) existing.dispose();
+
+  bodyEl.innerHTML = '';
+  bodyEl.textContent = msg;
+
+  if (details && type === 'danger') {
+    const link = document.createElement('a');
+    link.href = '#';
+    link.className = 'd-block small mt-1 text-white-50';
+    link.textContent = '▶ Детали ответа модели';
+    link.addEventListener('click', e => {
+      e.preventDefault();
+      const pre = $('error-detail-text');
+      if (pre) pre.textContent = details;
+      new bootstrap.Modal($('error-detail-modal')).show();
+    });
+    bodyEl.appendChild(link);
+  }
+
   el.className = `toast align-items-center text-bg-${type} border-0`;
-  bootstrap.Toast.getOrCreateInstance(el, { delay: 3500 }).show();
+  const opts = (type === 'danger' || type === 'warning')
+    ? { autohide: false }
+    : { autohide: true, delay: 3500 };
+  new bootstrap.Toast(el, opts).show();
 }
 
 // ── Оверлей загрузки ───────────────────────────────────────
@@ -486,7 +511,7 @@ async function runTaskSolve() {
     });
     const data = await readResponseJson(res);
     if (!res.ok || !data.ok) {
-      showToast(data.error || 'Ошибка', 'danger');
+      showToast(data.error || 'Ошибка', 'danger', data.raw_text || null);
       return;
     }
     if (data.task) {
@@ -494,7 +519,11 @@ async function runTaskSolve() {
       renderTaskCard(data.task, state.currentWrapper);
     }
     const rub = data.cost_rub != null ? Number(data.cost_rub).toFixed(2) : '?';
-    showToast(`Решение готово и сохранено · ~${rub} ₽`);
+    if (data.repaired) {
+      showToast(`Решение сохранено (JSON был восстановлен автоматически) · ~${rub} ₽`, 'warning');
+    } else {
+      showToast(`Решение готово и сохранено · ~${rub} ₽`);
+    }
   } catch (e) {
     showToast(String(e.message || e), 'danger');
   } finally {

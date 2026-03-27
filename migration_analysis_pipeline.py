@@ -1332,6 +1332,45 @@ SOLVE_SYSTEM_PROMPT = """Ты — учитель математики. Реши 
 - Первый непробельный символ «{», последний значимый «}», без блоков ```, без пояснений вне JSON"""
 
 
+def _repair_solve_json(text: str) -> Optional[dict]:
+    """Try to extract partial solution from truncated or malformed JSON."""
+    import re
+    steps: List[str] = []
+    fa = ""
+
+    # Find solution_steps array and extract complete quoted strings from it
+    sol_start = text.find('"solution_steps"')
+    if sol_start >= 0:
+        bracket = text.find('[', sol_start)
+        if bracket >= 0:
+            region = text[bracket + 1:]
+            for m in re.finditer(r'"((?:[^"\\]|\\.)*)"', region, re.DOTALL):
+                val = (m.group(1)
+                       .replace('\\n', '\n').replace('\\"', '"')
+                       .replace('\\\\', '\\').replace('\\t', '\t'))
+                if val.strip():
+                    steps.append(val)
+                after = region[m.end():].lstrip(' ,\n\t')
+                if after.startswith(']'):
+                    break
+
+    fa_match = re.search(r'"final_answer"\s*:\s*"((?:[^"\\]|\\.)*)"', text, re.DOTALL)
+    if fa_match:
+        fa = (fa_match.group(1)
+              .replace('\\n', '\n').replace('\\"', '"')
+              .replace('\\\\', '\\').replace('\\t', '\t'))
+
+    if steps or fa:
+        return {"solution_steps": steps, "final_answer": fa, "_repaired": True}
+
+    # Last resort: strip code fences and return as a single step
+    import re as _re
+    clean = _re.sub(r'```[a-z]*\n?', '', text, flags=_re.MULTILINE).strip()
+    if clean:
+        return {"solution_steps": [clean], "final_answer": "", "_repaired": True}
+    return None
+
+
 def run_task_solve(
     task: dict,
     api_key: str,
@@ -1349,7 +1388,7 @@ def run_task_solve(
     usage_total = {"input_tokens": 0, "output_tokens": 0}
     try:
         text, u = call_ai(api_key, model, messages, SOLVE_SYSTEM_PROMPT,
-                          max_tokens=4096, proxy_url=proxy_url, provider=provider)
+                          max_tokens=8192, proxy_url=proxy_url, provider=provider)
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -1357,15 +1396,19 @@ def run_task_solve(
     usage_total["output_tokens"] += u["output_tokens"]
 
     raw: Optional[dict] = None
+    repaired = False
     try:
         raw = extract_json_object(text)
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": f"Не удалось разобрать JSON ответа: {e}",
-            "raw_text": text[:3000],
-            "usage": usage_total,
-        }
+    except Exception:
+        raw = _repair_solve_json(text)
+        if raw is None:
+            return {
+                "ok": False,
+                "error": "Не удалось разобрать ответ модели — JSON не найден или оборван",
+                "raw_text": text[:4000],
+                "usage": usage_total,
+            }
+        repaired = True
 
     steps = raw.get("solution_steps")
     if not isinstance(steps, list):
@@ -1389,6 +1432,7 @@ def run_task_solve(
         "solution_steps": steps,
         "final_answer": final_answer,
         "solution_text": solution_text,
+        "repaired": repaired,
         "usage": usage_total,
         "cost_usd": round(cost_usd, 5),
         "cost_rub": round(cost_rub, 3),

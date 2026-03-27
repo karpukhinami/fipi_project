@@ -375,6 +375,21 @@
   </div>
 </div>
 
+<!-- ───── Модальное окно деталей ошибки ───── -->
+<div class="modal fade" id="error-detail-modal" tabindex="-1" aria-labelledby="error-detail-title">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h5 class="modal-title h6" id="error-detail-title">Ответ модели (сырой текст)</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-2">
+        <pre id="error-detail-text" style="white-space:pre-wrap;font-size:.78rem;max-height:65vh;overflow:auto;background:#1e1e2e;color:#cdd6f4;border-radius:6px;padding:10px 12px;"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ───── Toast уведомления ───── -->
 <div class="position-fixed bottom-0 end-0 p-3" style="z-index:9000">
   <div id="toast-main" class="toast align-items-center" role="alert">
