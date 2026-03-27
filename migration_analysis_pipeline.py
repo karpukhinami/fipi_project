@@ -60,6 +60,8 @@ OPENROUTER_MODEL_PRICING: Dict[str, Tuple[float, float]] = {
     "anthropic/claude-haiku-4.5":                  (1.00,  5.00),
     "deepseek/deepseek-chat-v3.1":                 (0.27,  1.10),
     "qwen/qwen3-235b-a22b-2507":                   (0.14,  0.39),
+    "qwen/qwen2.5-vl-72b-instruct":                (0.80,  0.80),
+    "qwen/qwen3-vl-235b-a22b-instruct":            (0.20,  0.88),
     "openai/gpt-4o-mini":                          (0.15,  0.60),
     "openai/gpt-4.1-nano":                         (0.10,  0.40),
     "mistralai/mistral-small-3.1-24b-instruct":    (0.05,  0.15),
