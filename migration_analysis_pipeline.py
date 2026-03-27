@@ -1457,6 +1457,137 @@ def run_task_solve(
     }
 
 
+RECOGNIZE_SYSTEM_PROMPT = """Ты получаешь одно или несколько изображений из условия задания по математике или другому предмету.
+Каждое изображение помечено меткой «Файл: <имя>» прямо перед ним.
+
+Для каждого изображения определи, что на нём изображено, и верни результат в JSON.
+
+КЛАССИФИКАЦИЯ:
+«formula» — если на изображении ТОЛЬКО математическое выражение, формула или уравнение:
+  числа, переменные, знаки операций, дроби, корни, степени, суммы, интегралы, матрицы и т.п.,
+  без координатных осей, без геометрических фигур, без рисунков.
+«image» — всё остальное: графики функций, геометрические чертежи, схемы, диаграммы, таблицы, рисунки,
+  системы координат, изображения физических объектов.
+
+ДЛЯ ФОРМУЛ (type = "formula"):
+Поле "formula" — LaTeX-код выражения.
+  Правила:
+  - Без обрамляющих символов: без $, $$, \\(, \\), \\[, \\].
+  - Точно воспроизводи все числа, переменные, знаки, дроби (\\frac{}{}), корни (\\sqrt{}),
+    степени, индексы, суммы (\\sum), интегралы (\\int), предельные значения (\\lim),
+    греческие буквы, стрелки, скобки.
+  - Если формула многострочная — используй среду aligned: \\begin{aligned}...\\end{aligned}.
+
+ДЛЯ ИЗОБРАЖЕНИЙ (type = "image"):
+Поле "description" — подробное текстовое описание на русском языке.
+  Включи обязательно:
+  - Тип объекта: график функции / геометрическая фигура / схема / таблица / …
+  - Все числовые данные: подписи осей и их масштаб, координаты точек, длины отрезков, углы,
+    значения в ячейках таблицы, подписи на рисунке.
+  - Ключевые геометрические или функциональные характеристики: вид кривой, точки пересечения,
+    вершины, асимптоты, особые точки.
+  - Описание должно быть достаточным для решения задачи без исходного изображения.
+
+ТРЕБОВАНИЯ К ОТВЕТУ:
+- Только один JSON-объект без каких-либо пояснений вне него.
+- Первый непробельный символ «{», последний значимый «}».
+- Без блоков ```.
+- Имена файлов берутся точно из меток «Файл: <имя>».
+
+Формат:
+{
+  "results": {
+    "<имя_файла_1>": {"type": "formula", "formula": "..."},
+    "<имя_файла_2>": {"type": "image", "description": "..."}
+  }
+}"""
+
+
+def run_image_recognition(
+    task: dict,
+    api_key: str,
+    model: str = "claude-sonnet-4-20250514",
+    proxy_url: Optional[str] = None,
+    provider: str = "anthropic",
+) -> dict:
+    """Распознаёт изображения задания: формулы → LaTeX, рисунки → текстовое описание.
+    Возвращает {ok, results: {filename: {formula?/description?}}, cost_rub, cost_usd}."""
+    images = collect_images_for_analysis_task(task)
+    if not images:
+        return {"ok": False, "error": "В задании нет изображений"}
+
+    # Строим сообщение: для каждого изображения — метка + image block
+    user_parts: List[dict] = []
+    skipped: List[str] = []
+    sent_filenames: List[str] = []
+    for filename, imgdata in images.items():
+        prepared = _prepare_image_for_anthropic(imgdata.get("mime", "image/png"), imgdata.get("data", ""))
+        if prepared is None:
+            skipped.append(filename)
+            continue
+        out_mime, out_b64 = prepared
+        user_parts.append({"type": "text", "text": f"Файл: {filename}"})
+        user_parts.append({"type": "image", "source": {"type": "base64", "media_type": out_mime, "data": out_b64}})
+        sent_filenames.append(filename)
+
+    if not user_parts:
+        return {"ok": False, "error": "Не удалось подготовить ни одного изображения (неподдерживаемый формат)"}
+
+    messages = [{"role": "user", "content": user_parts}]
+    usage_total = {"input_tokens": 0, "output_tokens": 0}
+    try:
+        text, u = call_ai(api_key, model, messages, RECOGNIZE_SYSTEM_PROMPT,
+                          max_tokens=4096, proxy_url=proxy_url, provider=provider)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    usage_total["input_tokens"] += u["input_tokens"]
+    usage_total["output_tokens"] += u["output_tokens"]
+
+    raw: Optional[dict] = None
+    try:
+        raw = extract_json_object(text)
+    except Exception:
+        # попытка достать хоть что-то
+        try:
+            raw = json.loads(text.strip())
+        except Exception:
+            raw = None
+
+    if not isinstance(raw, dict) or "results" not in raw:
+        return {
+            "ok": False,
+            "error": "Не удалось разобрать ответ модели — JSON не найден или не содержит поля results",
+            "raw_text": text[:4000],
+            "usage": usage_total,
+        }
+
+    results: dict = {}
+    for fname, rec in (raw.get("results") or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        kind = rec.get("type", "")
+        if kind == "formula" and rec.get("formula"):
+            results[fname] = {"formula": str(rec["formula"]).strip()}
+        elif kind == "image" and rec.get("description"):
+            results[fname] = {"description": str(rec["description"]).strip()}
+
+    inp_p, out_p = model_pricing(model, provider)
+    cost_usd = (usage_total["input_tokens"] / 1_000_000) * inp_p + \
+               (usage_total["output_tokens"] / 1_000_000) * out_p
+    cost_rub = cost_usd * RUB_PER_USD
+
+    return {
+        "ok": True,
+        "results": results,
+        "sent": sent_filenames,
+        "skipped": skipped,
+        "usage": usage_total,
+        "cost_usd": round(cost_usd, 5),
+        "cost_rub": round(cost_rub, 3),
+    }
+
+
 def run_task_analysis(
     task: dict,
     api_key: str,

@@ -532,6 +532,64 @@ async function runTaskSolve() {
 }
 window.runTaskSolve = runTaskSolve;
 
+async function runImageRecognition() {
+  const { model, provider, clKey } = getAiSettings();
+  const task = state.currentTask;
+  if (!task) return;
+
+  const images = task.images || {};
+  if (!Object.keys(images).length) {
+    showToast('В задании нет изображений', 'warning');
+    return;
+  }
+
+  const payload = {
+    model, provider,
+    id: task.id || '',
+    group_id: task.group_id || '',
+    group_position: task.group_position || '',
+  };
+  if (provider !== 'openrouter') {
+    if (!clKey) {
+      showToast('Укажите API-ключ Claude на странице настроек AI', 'warning');
+      return;
+    }
+    payload.api_key = clKey;
+  }
+
+  setLoading(true, 'Распознаю изображения…');
+  try {
+    const res = await fetch('/api/tasks/recognize-images', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await readResponseJson(res);
+    if (!res.ok || !data.ok) {
+      showToast(data.error || 'Ошибка', 'danger', data.raw_text || null);
+      return;
+    }
+    if (data.task) {
+      state.currentTask = data.task;
+      renderTaskCard(data.task, state.currentWrapper);
+    }
+    const rub = data.cost_rub != null ? Number(data.cost_rub).toFixed(2) : '?';
+    const results = data.results || {};
+    const formulas = Object.values(results).filter(r => r.formula).length;
+    const descs = Object.values(results).filter(r => r.description).length;
+    const parts = [];
+    if (formulas) parts.push(`формул: ${formulas}`);
+    if (descs) parts.push(`описаний: ${descs}`);
+    const summary = parts.length ? ` (${parts.join(', ')})` : '';
+    showToast(`Распознавание готово${summary} · ~${rub} ₽`);
+  } catch (e) {
+    showToast(String(e.message || e), 'danger');
+  } finally {
+    setLoading(false);
+  }
+}
+window.runImageRecognition = runImageRecognition;
+
 async function runSaveAnalysis() {
   if (!_lastAnalysisSaveData) {
     showToast('Нет данных для сохранения — сначала запустите анализ', 'warning');
@@ -729,6 +787,9 @@ function renderTaskCard(task, wrapper) {
         </button>
         <button class="btn btn-sm btn-outline-success" onclick="runTaskSolve()" id="btn-solve-task" title="Только решить и записать в поля Решение и Ответ">
           <i class="bi bi-calculator me-1"></i>Решить
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="runImageRecognition()" id="btn-recognize-images" title="Распознать формулы и описать рисунки">
+          <i class="bi bi-eye me-1"></i>Распознать изображения
         </button>
         <button class="btn btn-sm btn-success" onclick="runSaveAnalysis()" id="btn-save-analysis" title="Сохранить результат анализа в базу данных" style="display:none">
           <i class="bi bi-floppy me-1"></i>Сохранить в базу
@@ -941,12 +1002,31 @@ function renderImage(filename, images, inline) {
   if (!imgData || !imgData.data) {
     return `<span class="text-danger">[изображение не найдено: ${esc(filename)}]</span>`;
   }
-  const src = `data:${imgData.mime || 'image/png'};base64,${imgData.data}`;
-  if (inline) {
-    return `<img src="${src}" class="inline-img" alt="${esc(filename)}" title="${esc(filename)}"/>`;
-  } else {
-    return `<img src="${src}" class="block-img" alt="${esc(filename)}" title="${esc(filename)}"/>`;
+
+  // Если формула распознана — подставляем LaTeX вместо картинки
+  if (imgData.formula) {
+    const latex = imgData.formula;
+    if (inline) {
+      return `<span class="recognized-formula-inline" title="${esc(filename)}">\\(${escHtml(latex)}\\)</span>`;
+    } else {
+      return `<div class="recognized-formula-block" title="${esc(filename)}">\\[${escHtml(latex)}\\]</div>`;
+    }
   }
+
+  const src = `data:${imgData.mime || 'image/png'};base64,${imgData.data}`;
+  let html;
+  if (inline) {
+    html = `<img src="${src}" class="inline-img" alt="${esc(filename)}" title="${esc(filename)}"/>`;
+  } else {
+    html = `<img src="${src}" class="block-img" alt="${esc(filename)}" title="${esc(filename)}"/>`;
+  }
+
+  // Если есть описание — добавляем блок под картинкой
+  if (imgData.description) {
+    html += `<div class="img-description-box"><i class="bi bi-info-circle me-1"></i>${escHtml(imgData.description)}</div>`;
+  }
+
+  return html;
 }
 
 function isUrl(s) {

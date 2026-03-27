@@ -1140,6 +1140,17 @@ def update_task(task_id, group_id, group_position, fields):
     return True
 
 
+def update_task_images_json(task_id, group_id, group_position, images_dict):
+    """Обновить images_json задания целиком (напр. после распознавания формул/описаний)."""
+    conn = get_conn()
+    conn.execute(
+        'UPDATE tasks SET images_json = %s WHERE id = %s AND group_id = %s AND group_position = %s',
+        (json.dumps(images_dict, ensure_ascii=False), task_id or '', group_id or '', group_position or '')
+    )
+    conn.commit()
+    conn.close()
+
+
 def delete_task(task_id, group_id, group_position):
     conn = get_conn()
     cur = conn.execute(

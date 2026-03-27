@@ -6,7 +6,7 @@ import requests
 from flask import Flask, request, jsonify, render_template, send_file
 from migration_database import (
     init_db, import_tasks, get_tasks, get_task_by_id_params,
-    update_task, export_tasks, get_filter_options, get_task_by_rowid, get_group_wrapper,
+    update_task, update_task_images_json, export_tasks, get_filter_options, get_task_by_rowid, get_group_wrapper,
     clear_task_analysis,
     get_kes_catalog, rebuild_kes_catalog, delete_task, count_tasks_filtered, delete_tasks_filtered,
     get_attachment_data, get_curriculum_topics, update_curriculum_topic,
@@ -17,7 +17,7 @@ from migration_database import (
     get_skills_for_catalog, get_content_elements_for_catalog,
 )
 from migration_analysis_pipeline import (
-    run_task_analysis, run_task_solve, build_analysis_prompt_page_payload, commit_task_analysis_to_db,
+    run_task_analysis, run_task_solve, run_image_recognition, build_analysis_prompt_page_payload, commit_task_analysis_to_db,
 )
 
 app = Flask(__name__)
@@ -592,6 +592,54 @@ def api_tasks_solve():
     except Exception as e:
         import traceback
         app.logger.exception('api_tasks_solve')
+        payload = {'ok': False, 'error': f'Внутренняя ошибка сервера: {e}'}
+        if app.debug:
+            payload['traceback'] = traceback.format_exc()
+        return jsonify(payload), 500
+
+
+@app.route('/api/tasks/recognize-images', methods=['POST'])
+def api_tasks_recognize_images():
+    try:
+        body = request.get_json() or {}
+        provider = (body.get('provider') or 'anthropic').strip()
+        if provider == 'openrouter':
+            api_key = os.environ.get('OPENROUTER_API_KEY', '').strip()
+            if not api_key:
+                return jsonify({'ok': False, 'error': 'Переменная OPENROUTER_API_KEY не задана на сервере'}), 400
+        else:
+            api_key = (body.get('api_key') or body.get('claude_api_key') or '').strip()
+            if not api_key:
+                api_key = os.environ.get('ANTHROPIC_API_KEY', '').strip()
+            if not api_key:
+                return jsonify({'ok': False, 'error': 'Нужен API-ключ (Claude)'}), 400
+
+        task_id = body.get('id', '')
+        group_id = body.get('group_id', '')
+        group_position = body.get('group_position', '')
+        task = get_task_by_id_params(task_id, group_id, group_position)
+        if not task:
+            return jsonify({'ok': False, 'error': 'Задание не найдено'}), 404
+
+        model = body.get('model') or ('claude-sonnet-4-20250514' if provider == 'anthropic' else 'google/gemini-2.5-flash-preview')
+        proxy_url = (body.get('proxy_url') or '').strip() or None
+        result = run_image_recognition(task, api_key, model=model, proxy_url=proxy_url, provider=provider)
+        if not result.get('ok'):
+            return jsonify(result), 400
+
+        # Мержим результаты в существующий images_json
+        images = dict(task.get('images') or {})
+        for fname, rec in (result.get('results') or {}).items():
+            if fname in images:
+                images[fname] = {**images[fname], **rec}
+        update_task_images_json(task_id, group_id, group_position, images)
+
+        fresh = get_task_by_id_params(task_id, group_id, group_position)
+        result['task'] = fresh
+        return jsonify(result)
+    except Exception as e:
+        import traceback
+        app.logger.exception('api_tasks_recognize_images')
         payload = {'ok': False, 'error': f'Внутренняя ошибка сервера: {e}'}
         if app.debug:
             payload['traceback'] = traceback.format_exc()
