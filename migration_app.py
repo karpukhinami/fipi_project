@@ -17,7 +17,9 @@ from migration_database import (
     get_skills_for_catalog, get_content_elements_for_catalog,
 )
 from migration_analysis_pipeline import (
-    run_task_analysis, run_task_solve, run_image_recognition, build_analysis_prompt_page_payload, commit_task_analysis_to_db,
+    run_task_analysis, run_task_solve, run_image_recognition,
+    substitute_formulas_in_text,
+    build_analysis_prompt_page_payload, commit_task_analysis_to_db,
 )
 
 app = Flask(__name__)
@@ -629,10 +631,28 @@ def api_tasks_recognize_images():
 
         # Мержим результаты в существующий images_json
         images = dict(task.get('images') or {})
-        for fname, rec in (result.get('results') or {}).items():
+        recognition = result.get('results') or {}
+        for fname, rec in recognition.items():
             if fname in images:
                 images[fname] = {**images[fname], **rec}
         update_task_images_json(task_id, group_id, group_position, images)
+
+        # Строим formatted_text с подставленными формулами
+        # Источник — всегда исходный text (с маркерами), не formatted_text
+        raw_text = task.get('text') or ''
+        new_formatted = substitute_formulas_in_text(raw_text, recognition)
+
+        # Строим solution с подставленными формулами
+        # Источник — solution_with_images (предыдущий бэкап), если нет — текущий solution
+        original_solution = (task.get('solution_with_images') or '').strip() or (task.get('solution') or '')
+        new_solution = substitute_formulas_in_text(original_solution, recognition)
+
+        update_fields: dict = {'formatted_text': new_formatted}
+        if original_solution:
+            # Сохраняем исходник (с маркерами) как бэкап и обновлённое решение
+            update_fields['solution_with_images'] = original_solution
+            update_fields['solution'] = new_solution
+        update_task(task_id, group_id, group_position, update_fields)
 
         fresh = get_task_by_id_params(task_id, group_id, group_position)
         result['task'] = fresh
@@ -644,6 +664,42 @@ def api_tasks_recognize_images():
         if app.debug:
             payload['traceback'] = traceback.format_exc()
         return jsonify(payload), 500
+
+
+@app.route('/api/tasks/reset-images', methods=['POST'])
+def api_tasks_reset_images():
+    try:
+        body = request.get_json() or {}
+        task_id = body.get('id', '')
+        group_id = body.get('group_id', '')
+        group_position = body.get('group_position', '')
+        task = get_task_by_id_params(task_id, group_id, group_position)
+        if not task:
+            return jsonify({'ok': False, 'error': 'Задание не найдено'}), 404
+
+        # Убираем formula/description из images_json
+        images = {
+            fname: {k: v for k, v in data.items() if k not in ('formula', 'description')}
+            for fname, data in (task.get('images') or {}).items()
+        }
+        update_task_images_json(task_id, group_id, group_position, images)
+
+        # Восстанавливаем solution из бэкапа, если он есть
+        reset_fields: dict = {}
+        backup_solution = (task.get('solution_with_images') or '').strip()
+        if backup_solution:
+            reset_fields['solution'] = backup_solution
+            reset_fields['solution_with_images'] = ''
+        # Сбрасываем formatted_text обратно в исходный text
+        reset_fields['formatted_text'] = task.get('text') or ''
+        update_task(task_id, group_id, group_position, reset_fields)
+
+        fresh = get_task_by_id_params(task_id, group_id, group_position)
+        return jsonify({'ok': True, 'task': fresh})
+    except Exception as e:
+        import traceback
+        app.logger.exception('api_tasks_reset_images')
+        return jsonify({'ok': False, 'error': f'Внутренняя ошибка: {e}'}), 500
 
 
 @app.route('/api/tasks/save-analysis', methods=['POST'])

@@ -142,6 +142,7 @@ def init_db():
             analysis_result_json TEXT,
             analysis_usage_json TEXT,
             analysis_fallback_json TEXT,
+            solution_with_images TEXT,
             PRIMARY KEY (id, group_id, group_position)
         )
     ''')
@@ -152,6 +153,10 @@ def init_db():
     conn.execute('CREATE INDEX IF NOT EXISTS idx_kes        ON tasks(kes)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_group_id   ON tasks(group_id)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_tasks_analyzed_topic ON tasks(analyzed_topic_id)')
+
+    # Миграция: добавляем новые колонки к существующей таблице, если их нет
+    conn.execute('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS solution_with_images TEXT')
+    conn.commit()
 
     # Справочник КЭС
     conn.execute('''
@@ -1120,7 +1125,8 @@ def get_group_wrapper(group_id):
 def update_task(task_id, group_id, group_position, fields):
     allowed = {
         'task_number', 'kes', 'answer_type', 'answer_format',
-        'answer_unit', 'answer', 'solution', 'text', 'formatted_text'
+        'answer_unit', 'answer', 'solution', 'solution_with_images',
+        'text', 'formatted_text'
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:

@@ -581,7 +581,10 @@ async function runImageRecognition() {
     if (formulas) parts.push(`формул: ${formulas}`);
     if (descs) parts.push(`описаний: ${descs}`);
     const summary = parts.length ? ` (${parts.join(', ')})` : '';
-    showToast(`Распознавание готово${summary} · ~${rub} ₽`);
+    const skipped = data.skipped || [];
+    const skipNote = skipped.length ? ` · пропущено (не конвертировано): ${skipped.join(', ')}` : '';
+    const toastType = skipped.length ? 'warning' : 'success';
+    showToast(`Распознавание готово${summary} · ~${rub} ₽${skipNote}`, toastType);
   } catch (e) {
     showToast(String(e.message || e), 'danger');
   } finally {
@@ -589,6 +592,38 @@ async function runImageRecognition() {
   }
 }
 window.runImageRecognition = runImageRecognition;
+
+async function runResetImages() {
+  const task = state.currentTask;
+  if (!task) return;
+  setLoading(true, 'Откат распознавания…');
+  try {
+    const res = await fetch('/api/tasks/reset-images', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: task.id || '',
+        group_id: task.group_id || '',
+        group_position: task.group_position || '',
+      }),
+    });
+    const data = await readResponseJson(res);
+    if (!res.ok || !data.ok) {
+      showToast(data.error || 'Ошибка', 'danger');
+      return;
+    }
+    if (data.task) {
+      state.currentTask = data.task;
+      renderTaskCard(data.task, state.currentWrapper);
+    }
+    showToast('Формулы и описания удалены, картинки восстановлены');
+  } catch (e) {
+    showToast(String(e.message || e), 'danger');
+  } finally {
+    setLoading(false);
+  }
+}
+window.runResetImages = runResetImages;
 
 async function runSaveAnalysis() {
   if (!_lastAnalysisSaveData) {
@@ -790,6 +825,9 @@ function renderTaskCard(task, wrapper) {
         </button>
         <button class="btn btn-sm btn-outline-secondary" onclick="runImageRecognition()" id="btn-recognize-images" title="Распознать формулы и описать рисунки">
           <i class="bi bi-eye me-1"></i>Распознать изображения
+        </button>
+        <button class="btn btn-sm btn-outline-warning" onclick="runResetImages()" id="btn-reset-images" title="Откатить распознавание: удалить все подставленные формулы и описания">
+          <i class="bi bi-arrow-counterclockwise me-1"></i>Откатить картинки
         </button>
         <button class="btn btn-sm btn-success" onclick="runSaveAnalysis()" id="btn-save-analysis" title="Сохранить результат анализа в базу данных" style="display:none">
           <i class="bi bi-floppy me-1"></i>Сохранить в базу
